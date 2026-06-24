@@ -1,0 +1,25 @@
+apiVersion: 1
+
+# Dev-only provisioning for `docker compose up`. The plugin auto-enables with
+# sensible defaults; enter your PushWard hlk_ key + pick a datasource in the
+# plugin Configuration page (or set secureJsonData.apiKey below for a fully
+# unattended dev loop). Do NOT commit a real key.
+apps:
+  - type: 'pushward-alerts-app'
+    org_id: 1
+    disabled: false
+    jsonData:
+      apiUrl: https://api.pushward.app
+      severityLabel: severity
+      defaultSeverity: warning
+      priority: 5
+      historyWindow: 30m
+      pollInterval: 30s
+      cleanupDelay: 15m
+      staleTimeout: 24h
+      smoothing: true
+      scale: linear
+      decimals: 1
+    # secureJsonData:
+    #   apiKey: hlk_...        # your PushWard integration key
+    #   webhookToken: ...      # set automatically by the Connect wizard

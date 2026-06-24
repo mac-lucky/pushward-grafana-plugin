@@ -1,0 +1,65 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "app",
+  "name": "PushWard",
+  "id": "pushward-alerts-app",
+  "backend": true,
+  "executable": "gpx_alerts",
+  "info": {
+    "keywords": ["app", "pushward", "alerting", "notifications", "live activities", "apns", "ios", "webhook"],
+    "description": "Turn Grafana alerts into rich iOS Live Activities. Sets up the webhook contact point and builds a live, history-backed timeline that streams to PushWard over APNs.",
+    "author": {
+      "name": "PushWard"
+    },
+    "logos": {
+      "small": "img/logo-small.png",
+      "large": "img/logo.png"
+    },
+    "screenshots": [],
+    "version": "%VERSION%",
+    "updated": "%TODAY%"
+  },
+  "includes": [
+    {
+      "type": "page",
+      "name": "Overview",
+      "path": "/a/%PLUGIN_ID%/overview",
+      "addToNav": true,
+      "defaultNav": true
+    },
+    {
+      "type": "page",
+      "name": "Connect",
+      "path": "/a/%PLUGIN_ID%/connect",
+      "addToNav": true,
+      "defaultNav": false
+    },
+    {
+      "type": "page",
+      "name": "Activities",
+      "path": "/a/%PLUGIN_ID%/activities",
+      "addToNav": true,
+      "defaultNav": false
+    },
+    {
+      "type": "page",
+      "icon": "cog",
+      "name": "Configuration",
+      "path": "/plugins/%PLUGIN_ID%",
+      "role": "Admin",
+      "addToNav": true
+    }
+  ],
+  "iam": {
+    "permissions": [
+      { "action": "datasources:read", "scope": "datasources:*" },
+      { "action": "datasources:query", "scope": "datasources:*" },
+      { "action": "alert.rules:read", "scope": "folders:*" },
+      { "action": "alert.instances:read" }
+    ]
+  },
+  "dependencies": {
+    "grafanaDependency": ">=12.3.0",
+    "plugins": []
+  }
+}

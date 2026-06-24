@@ -1,0 +1,32 @@
+export const testIds = {
+  appConfig: {
+    container: 'data-testid ac-container',
+    apiKey: 'data-testid ac-api-key',
+    apiUrl: 'data-testid ac-api-url',
+    datasource: 'data-testid ac-datasource',
+    severityLabel: 'data-testid ac-severity-label',
+    defaultSeverity: 'data-testid ac-default-severity',
+    priority: 'data-testid ac-priority',
+    historyWindow: 'data-testid ac-history-window',
+    pollInterval: 'data-testid ac-poll-interval',
+    cleanupDelay: 'data-testid ac-cleanup-delay',
+    staleTimeout: 'data-testid ac-stale-timeout',
+    smoothing: 'data-testid ac-smoothing',
+    scale: 'data-testid ac-scale',
+    decimals: 'data-testid ac-decimals',
+    submit: 'data-testid ac-submit-form',
+  },
+  overview: {
+    container: 'data-testid pg-overview-container',
+    status: 'data-testid pg-overview-status',
+  },
+  connect: {
+    container: 'data-testid pg-connect-container',
+    connectButton: 'data-testid pg-connect-button',
+    testNotification: 'data-testid pg-connect-test-notification',
+    testTimeline: 'data-testid pg-connect-test-timeline',
+  },
+  activities: {
+    container: 'data-testid pg-activities-container',
+  },
+};
