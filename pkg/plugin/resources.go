@@ -21,6 +21,7 @@ const webhookResourcePath = "/api/plugins/pushward-alerts-app/resources/webhook"
 var (
 	errGrafanaURLUnavailable = errors.New("grafana app URL unavailable (no request context yet)")
 	errNoDatasource          = errors.New("no datasource configured for timeline history")
+	errNoGrafanaToken        = errors.New("no Grafana service-account token for datasource history: run the Connect wizard (or enable the externalServiceAccounts feature toggle)")
 )
 
 // registerRoutes wires the plugin's resource endpoints. Paths are relative to
@@ -46,17 +47,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	apiKeyOK, detail := a.probeAPIKey(r.Context())
 	dsOK := a.settings.DatasourceUID != ""
+	historyOK := dsOK && a.historyTokenAvailable()
 	msg := "ok"
 	switch {
 	case !apiKeyOK:
 		msg = detail
 	case !dsOK:
 		msg = "No datasource selected (timeline history disabled)"
+	case !historyOK:
+		msg = "Datasource selected, but timeline history is disabled — run the Connect wizard to authorize datasource queries"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":         apiKeyOK,
 		"apiKey":     apiKeyOK,
 		"datasource": dsOK,
+		"history":    historyOK,
 		"message":    msg,
 	})
 }

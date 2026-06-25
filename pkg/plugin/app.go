@@ -44,10 +44,13 @@ type App struct {
 
 	httpClient *http.Client // PushWard passthrough (/me, /activities)
 
-	// Grafana connection (app URL + IAM service-account token), refreshed from
-	// every request's GrafanaConfig. Read by the datasource-proxy querier and the
-	// grafanaapi client; a stable token keeps background pollers authenticated
-	// between requests.
+	// Grafana connection: app URL + the IAM external service-account token,
+	// refreshed from every request's GrafanaConfig. grafanaTok is the IAM token
+	// ONLY (empty unless the externalServiceAccounts toggle is on). The
+	// provisioning/alertmanager client reads it via grafanaConn(); the
+	// datasource-proxy querier instead prefers the webhook SA token via
+	// grafanaConnDatasource(). A stable token keeps background pollers
+	// authenticated between requests.
 	connMu     sync.RWMutex
 	grafanaURL string
 	grafanaTok string
@@ -126,8 +129,11 @@ func (a *App) CheckHealth(ctx context.Context, _ *backend.CheckHealthRequest) (*
 	}
 
 	msg := "PushWard key valid."
-	if a.settings.DatasourceUID == "" {
+	switch {
+	case a.settings.DatasourceUID == "":
 		msg = "PushWard key valid. Select a datasource on the Configuration page to enable timeline history."
+	case !a.historyTokenAvailable():
+		msg = "PushWard key valid. Run the Connect wizard to enable timeline history — datasource queries need a Grafana service-account token."
 	}
 	return &backend.CheckHealthResult{Status: backend.HealthStatusOk, Message: msg}, nil
 }
@@ -178,25 +184,59 @@ func (a *App) CollectMetrics(_ context.Context, _ *backend.CollectMetricsRequest
 	return &backend.CollectMetricsResult{PrometheusMetrics: payload}, nil
 }
 
-// grafanaConn returns the current Grafana app URL and a token for Grafana's own
-// API. It prefers the IAM external service-account token, but that requires the
-// `externalServiceAccounts` feature toggle (off by default), so it falls back to
-// the webhook service-account token minted by the Connect wizard — a Viewer SA
-// that can query datasources through the proxy (verified). This keeps the
-// timeline history query working on a stock Grafana with no feature toggles.
+// grafanaConn returns the Grafana app URL and the IAM external service-account
+// token, used by the grafanaapi client for Grafana's own provisioning + alertmanager
+// APIs (rule-query extract, alert-state backstop). Those calls need plugin-scoped
+// permissions, so there is deliberately NO webhook-token fallback here: the webhook
+// SA is a Viewer that can be folder-RBAC-scoped, and feeding it to the alertmanager
+// backstop would let a scoped-empty alert list look like "resolved" and prematurely
+// end a still-firing activity. When the IAM token is absent (the
+// externalServiceAccounts toggle is off — the default), the token is empty and these
+// calls fail closed: the backstop stays an inert no-op and the staleTimeout sweeper
+// handles cleanup, exactly as documented.
 func (a *App) grafanaConn() (string, string) {
 	a.connMu.RLock()
-	url, tok := a.grafanaURL, a.grafanaTok
+	defer a.connMu.RUnlock()
+	return a.grafanaURL, a.grafanaTok
+}
+
+// grafanaConnDatasource returns the Grafana app URL and the token for querying the
+// datasource proxy (timeline history). It prefers the webhook service-account token
+// minted by the Connect wizard — a Viewer SA that can query datasources through the
+// proxy (verified live) and is stable across the instance lifetime — and falls back
+// to the IAM token when the wizard hasn't run. A Viewer SA is sufficient here (unlike
+// the provisioning/alertmanager path), so the fallback is safe; preferring the stable
+// webhook token also means a rotated or revoked IAM token can't silently dark history
+// queries. Returns an empty token when neither is available; callers must guard.
+func (a *App) grafanaConnDatasource() (string, string) {
+	a.connMu.RLock()
+	url, iamTok := a.grafanaURL, a.grafanaTok
 	a.connMu.RUnlock()
-	if tok == "" {
-		tok = a.settings.WebhookToken
+	if tok := a.settings.WebhookToken; tok != "" {
+		return url, tok
 	}
-	return url, tok
+	return url, iamTok
+}
+
+// historyTokenAvailable reports whether any token usable for the datasource-proxy
+// history query is present (webhook SA token or IAM token). When false but a
+// datasource is selected, timeline history is disabled and the user must run the
+// Connect wizard (or enable the externalServiceAccounts toggle).
+func (a *App) historyTokenAvailable() bool {
+	if a.settings.WebhookToken != "" {
+		return true
+	}
+	a.connMu.RLock()
+	defer a.connMu.RUnlock()
+	return a.grafanaTok != ""
 }
 
 // refreshGrafanaConn updates the stored Grafana app URL + IAM token from the
-// request's GrafanaConfig. Empty/erroring values leave the prior value intact so
-// a context without Grafana config (e.g. instance construction) doesn't clear a
+// request's GrafanaConfig. grafanaTok holds the IAM token only; an empty IAM
+// token is normal (the externalServiceAccounts toggle is off by default), in
+// which case the datasource-proxy path uses the webhook token instead (see
+// grafanaConnDatasource). Empty/erroring values leave the prior value intact so a
+// context without Grafana config (e.g. instance construction) doesn't clear a
 // good connection.
 func (a *App) refreshGrafanaConn(ctx context.Context) {
 	cfg := sdkconfig.GrafanaConfigFromContext(ctx)
@@ -217,20 +257,30 @@ func (a *App) refreshGrafanaConn(ctx context.Context) {
 }
 
 // dsQuerier implements bridge.MetricsQuerier by querying the configured datasource
-// through Grafana's datasource proxy with the IAM service-account token. A fresh
-// (stateless) metrics client is built per query so it always uses the current
-// connection; the cost is negligible (a struct over a shared http.Client).
+// through Grafana's datasource proxy. It authenticates with grafanaConnDatasource()
+// — the webhook SA token preferred, IAM token as fallback — NOT the IAM-only
+// grafanaConn() the provisioning/alertmanager client uses; the two accessors are
+// intentionally distinct (see grafanaConnDatasource). A fresh (stateless) metrics
+// client is built per query so it always uses the current connection; the cost is
+// negligible (a struct over a shared http.Client).
 type dsQuerier struct {
 	app *App
 }
 
 func (d *dsQuerier) client() (*bridge.MetricsClient, error) {
-	url, tok := d.app.grafanaConn()
+	url, tok := d.app.grafanaConnDatasource()
 	if url == "" {
 		return nil, errGrafanaURLUnavailable
 	}
 	if d.app.settings.DatasourceUID == "" {
 		return nil, errNoDatasource
+	}
+	// Guard an empty (or whitespace-only) token explicitly: without it the proxy is
+	// hit with a bare "Authorization: Bearer " header and 401s, silently darkening
+	// history with a confusing error. A clear message points the user at the Connect
+	// wizard. TrimSpace so a blank token also fails closed rather than sending "Bearer  ".
+	if strings.TrimSpace(tok) == "" {
+		return nil, errNoGrafanaToken
 	}
 	base := grafanaapi.DatasourceProxyURL(url, d.app.settings.DatasourceUID)
 	return bridge.NewMetricsClient(base, bridge.WithBearerToken(tok)), nil
