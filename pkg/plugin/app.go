@@ -178,11 +178,20 @@ func (a *App) CollectMetrics(_ context.Context, _ *backend.CollectMetricsRequest
 	return &backend.CollectMetricsResult{PrometheusMetrics: payload}, nil
 }
 
-// grafanaConn returns the current Grafana app URL and IAM service-account token.
+// grafanaConn returns the current Grafana app URL and a token for Grafana's own
+// API. It prefers the IAM external service-account token, but that requires the
+// `externalServiceAccounts` feature toggle (off by default), so it falls back to
+// the webhook service-account token minted by the Connect wizard — a Viewer SA
+// that can query datasources through the proxy (verified). This keeps the
+// timeline history query working on a stock Grafana with no feature toggles.
 func (a *App) grafanaConn() (string, string) {
 	a.connMu.RLock()
-	defer a.connMu.RUnlock()
-	return a.grafanaURL, a.grafanaTok
+	url, tok := a.grafanaURL, a.grafanaTok
+	a.connMu.RUnlock()
+	if tok == "" {
+		tok = a.settings.WebhookToken
+	}
+	return url, tok
 }
 
 // refreshGrafanaConn updates the stored Grafana app URL + IAM token from the
