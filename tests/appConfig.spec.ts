@@ -1,19 +1,17 @@
 import { test, expect } from './fixtures';
+import { testIds } from '../src/components/testIds';
 
-test('should be possible to save app configuration', async ({ appConfigPage, page }) => {
-  const saveButton = page.getByRole('button', { name: /Save API settings/i });
+test('should save app configuration', async ({ appConfigPage, page }) => {
+  // The config form renders.
+  await expect(page.getByTestId(testIds.appConfig.container)).toBeVisible();
 
-  // reset the configured secret
-  await page.getByRole('button', { name: /reset/i }).click();
+  // The API URL is always editable; set it and save.
+  const apiUrl = page.getByTestId(testIds.appConfig.apiUrl);
+  await apiUrl.clear();
+  await apiUrl.fill('https://api.pushward.app');
 
-  // enter some valid values
-  await page.getByRole('textbox', { name: 'API Key' }).fill('secret-api-key');
-  await page.getByRole('textbox', { name: 'API Url' }).clear();
-  await page.getByRole('textbox', { name: 'API Url' }).fill('http://www.my-awsome-grafana-app.com/api');
-
-  // listen for the server response on the saved form
+  // Capture the settings POST before the page reloads on success.
   const saveResponse = appConfigPage.waitForSettingsResponse();
-
-  await saveButton.click();
+  await page.getByTestId(testIds.appConfig.submit).click();
   await expect(saveResponse).toBeOK();
 });

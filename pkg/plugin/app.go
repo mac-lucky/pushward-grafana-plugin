@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -112,24 +114,59 @@ func (a *App) Dispose() {
 	}
 }
 
-// CheckHealth reports configuration readiness: the PushWard key must be set, and
-// a datasource is required for timeline history (a missing datasource degrades
-// to plain notifications rather than failing).
+// CheckHealth reports configuration readiness: the PushWard key must be present
+// and accepted by api.pushward.app, and a datasource is required for timeline
+// history (a missing datasource degrades to plain notifications, not an error).
 func (a *App) CheckHealth(ctx context.Context, _ *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
 	a.refreshGrafanaConn(ctx)
 
-	if a.settings.APIKey == "" {
-		return &backend.CheckHealthResult{
-			Status:  backend.HealthStatusError,
-			Message: "PushWard API key not set — open the plugin Configuration page and paste your hlk_ key.",
-		}, nil
+	keyOK, detail := a.probeAPIKey(ctx)
+	if !keyOK {
+		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: detail}, nil
 	}
 
-	msg := "PushWard configured."
+	msg := "PushWard key valid."
 	if a.settings.DatasourceUID == "" {
-		msg = "PushWard key set. Select a datasource on the Configuration page to enable timeline history."
+		msg = "PushWard key valid. Select a datasource on the Configuration page to enable timeline history."
 	}
 	return &backend.CheckHealthResult{Status: backend.HealthStatusOk, Message: msg}, nil
+}
+
+// probeAPIKey verifies the PushWard key by calling GET {apiURL}/me. It returns
+// whether the key is present AND accepted, plus a human-readable detail for the
+// UI. A transport error or non-2xx (other than 401/403) is reported as a
+// reachability problem rather than an outright-invalid key.
+func (a *App) probeAPIKey(ctx context.Context) (ok bool, detail string) {
+	if a.settings.APIKey == "" {
+		return false, "PushWard API key not set"
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet,
+		strings.TrimRight(a.settings.APIURL, "/")+"/me", nil)
+	if err != nil {
+		return false, "could not build request: " + err.Error()
+	}
+	req.Header.Set("Authorization", "Bearer "+a.settings.APIKey)
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return false, "could not reach " + a.settings.APIURL
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		_ = resp.Body.Close()
+	}()
+
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return true, ""
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return false, "PushWard rejected the API key"
+	default:
+		return false, fmt.Sprintf("PushWard returned status %d", resp.StatusCode)
+	}
 }
 
 // CollectMetrics exposes the bridge's Prometheus counters to Grafana.

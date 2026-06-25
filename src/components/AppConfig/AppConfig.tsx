@@ -182,7 +182,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
               noDefault
               width={40}
               filter={(ds: DataSourceInstanceSettings) =>
-                ds.type === 'prometheus' || ds.type.includes('victoriametrics')
+                ds.type === 'prometheus' || ds.type === 'victoriametrics-metrics-datasource'
               }
               onChange={(ds: DataSourceInstanceSettings) => setState({ ...state, datasourceUid: ds.uid })}
               onClear={() => setState({ ...state, datasourceUid: '' })}

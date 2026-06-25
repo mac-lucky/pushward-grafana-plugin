@@ -40,14 +40,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// handleHealthz is a lightweight status probe for the UI.
-func (a *App) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	apiKeyOK := a.settings.APIKey != ""
+// handleHealthz is the status probe for the UI. It validates the key against
+// api.pushward.app (GET /me), mirroring CheckHealth so the badges and the
+// plugin health page agree.
+func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	apiKeyOK, detail := a.probeAPIKey(r.Context())
 	dsOK := a.settings.DatasourceUID != ""
 	msg := "ok"
 	switch {
 	case !apiKeyOK:
-		msg = "PushWard API key not set"
+		msg = detail
 	case !dsOK:
 		msg = "No datasource selected (timeline history disabled)"
 	}
