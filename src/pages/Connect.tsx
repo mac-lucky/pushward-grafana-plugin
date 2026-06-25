@@ -145,7 +145,10 @@ function Connect({ meta }: ConnectProps) {
             )}
 
             <Field label="Webhook URL" description="The contact point posts alerts here. Created automatically on connect.">
-              <Input readOnly value={config?.webhookUrl || webhookUrl()} width={70} />
+              {/* Show the absolute, sub-path-safe URL actually provisioned into the
+                  contact point, not the backend's relative path, so it matches what
+                  the alerting engine posts to on reverse-proxy/sub-path installs. */}
+              <Input readOnly value={webhookUrl()} width={70} />
             </Field>
 
             <Stack direction="row" gap={1} wrap="wrap">

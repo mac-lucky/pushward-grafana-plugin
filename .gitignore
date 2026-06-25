@@ -46,3 +46,8 @@ ci/
 .idea
 
 .eslintcache
+
+# Build / validator artifacts
+/.cache/
+/pushward-alerts-app/
+pushward-alerts-app-*.zip

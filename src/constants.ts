@@ -13,4 +13,5 @@ export enum ROUTES {
   Overview = 'overview',
   Connect = 'connect',
   Activities = 'activities',
+  Widgets = 'widgets',
 }

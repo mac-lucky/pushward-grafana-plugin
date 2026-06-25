@@ -350,8 +350,9 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 			// timeline seed with empty values would be rejected 422, so we can't
 			// seed here.)
 			seed := b.buildContent(a, severity, nil)
-			b.poller.StartWithSeed(slug, expr, seriesLabel, &seed)
-			logger.Info("poller started (will seed on first values)")
+			if b.startPollerIfTracked(mapKey, slug, expr, seriesLabel, &seed) {
+				logger.Info("poller started (will seed on first values)")
+			}
 		}
 		return
 	}
@@ -385,9 +386,30 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 	}
 
 	if isNew && expr != "" {
-		b.poller.Start(slug, expr, seriesLabel)
-		logger.Info("poller started")
+		if b.startPollerIfTracked(mapKey, slug, expr, seriesLabel, nil) {
+			logger.Info("poller started")
+		}
 	}
+}
+
+// startPollerIfTracked starts the per-alert poller for slug only while the alert
+// is still tracked, holding b.mu across the presence check and the Start. A
+// concurrent resolved webhook deletes the entry under b.mu and then calls
+// poller.Stop without it, so holding b.mu here means the two interleave cleanly:
+// either Start runs first (the poller lands in p.active and the later Stop
+// cancels it) or the entry is already gone (we skip Start). That closes the
+// window where a resolved racing an in-flight firing-create could leave a poller
+// running forever against an already-ended activity. poller.Start/StartWithSeed
+// take only p.mu, never b.mu, so there is no lock-ordering cycle. Returns whether
+// a poller was started.
+func (b *Bridge) startPollerIfTracked(mapKey, slug, expr, seriesLabel string, seed *pushward.Content) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.active[mapKey]; !ok {
+		return false // resolved or swept while this firing was still in flight
+	}
+	b.poller.StartWithSeed(slug, expr, seriesLabel, seed)
+	return true
 }
 
 func (b *Bridge) handleResolved(ctx context.Context, a alert) {

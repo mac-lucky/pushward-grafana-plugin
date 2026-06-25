@@ -1,15 +1,26 @@
 import { lastValueFrom } from 'rxjs';
-import { getBackendSrv } from '@grafana/runtime';
+import { config, getBackendSrv } from '@grafana/runtime';
 import { PLUGIN_ID, RESOURCE_BASE_URL } from './constants';
 
 // ---------------------------------------------------------------------------
 // Backend resource responses (see the Go backend's /resources routes).
 // ---------------------------------------------------------------------------
 
+export type ApiKeyStatus = 'valid' | 'rejected' | 'unknown';
+
 export interface HealthzResponse {
   ok: boolean;
   apiKey: boolean;
+  // Precise tri-state: 'unknown' is a transient 404/5xx/unreachable blip, not a
+  // rejected key - render it as amber/grey, never as "invalid".
+  apiKeyStatus: ApiKeyStatus;
   datasource: boolean;
+  // Datasource selected AND a Grafana SA token is available (history actually works).
+  history: boolean;
+  // >=1 widget configured AND widget config parsed OK (engine publishing-ready).
+  widgets: boolean;
+  // Non-empty when the widget JSON failed to parse/validate.
+  widgetsError: string;
   message: string;
 }
 
@@ -29,6 +40,9 @@ export interface ConfigResponse {
   apiKeySet: boolean;
   webhookConnected: boolean;
   webhookUrl: string;
+  // Number of configured widgets; widgetsError is non-empty if their JSON is invalid.
+  widgetCount: number;
+  widgetsError: string;
 }
 
 export interface TestResponse {
@@ -36,13 +50,15 @@ export interface TestResponse {
   message: string;
 }
 
-// Raw passthrough of PushWard's GET /activities — kept loose on purpose.
+// Raw passthrough of PushWard's GET /activities, unwrapped by the backend into a
+// plain array. Kept loose on purpose - the server adds fields over time.
 export interface ActivitySummary {
   slug?: string;
   name?: string;
   state?: string;
   priority?: number;
-  template?: string;
+  // The template lives under content.template on the server, not at the top level.
+  content?: { template?: string; [key: string]: unknown };
   created_at?: string;
   updated_at?: string;
   [key: string]: unknown;
@@ -50,6 +66,27 @@ export interface ActivitySummary {
 
 export interface ActivitiesResponse {
   activities: ActivitySummary[];
+}
+
+// Raw passthrough of PushWard's GET /widgets, unwrapped by the backend into a
+// plain array. Each widget carries its rendered content under `content`.
+export interface WidgetContent {
+  template?: string;
+  value?: unknown;
+  unit?: string;
+  [key: string]: unknown;
+}
+
+export interface WidgetSummary {
+  slug?: string;
+  name?: string;
+  content?: WidgetContent;
+  updated_at?: string;
+  [key: string]: unknown;
+}
+
+export interface WidgetsResponse {
+  widgets: WidgetSummary[];
 }
 
 export interface HistoryEntry {
@@ -77,8 +114,15 @@ export function getConfig(): Promise<ConfigResponse> {
   return getBackendSrv().get<ConfigResponse>(`${RESOURCE_BASE_URL}/config`);
 }
 
-export function getActivities(): Promise<ActivitiesResponse> {
-  return getBackendSrv().get<ActivitiesResponse>(`${RESOURCE_BASE_URL}/activities`);
+export async function getActivities(): Promise<ActivitiesResponse> {
+  const res = await getBackendSrv().get<ActivitiesResponse>(`${RESOURCE_BASE_URL}/activities`);
+  // Backend always returns an array, but guard so the UI never maps over null.
+  return { activities: res?.activities ?? [] };
+}
+
+export async function getWidgets(): Promise<WidgetsResponse> {
+  const res = await getBackendSrv().get<WidgetsResponse>(`${RESOURCE_BASE_URL}/widgets`);
+  return { widgets: res?.widgets ?? [] };
 }
 
 export function getHistory(): Promise<HistoryResponse> {
@@ -99,6 +143,8 @@ export function sendTest(kind: TestKind): Promise<TestResponse> {
 // ---------------------------------------------------------------------------
 
 const WEBHOOK_SA_NAME = 'pushward-alerts-webhook';
+// Every webhook token is named with this prefix so old ones can be cleaned up.
+const WEBHOOK_SA_TOKEN_PREFIX = `${WEBHOOK_SA_NAME}-`;
 const CONTACT_POINT_NAME = 'PushWard';
 
 interface ServiceAccountDTO {
@@ -116,6 +162,11 @@ interface TokenResponse {
   key: string;
 }
 
+interface TokenDTO {
+  id: number;
+  name: string;
+}
+
 interface ContactPoint {
   uid?: string;
   name: string;
@@ -125,7 +176,11 @@ interface ContactPoint {
 
 /** Absolute URL the contact point posts alerts to (loops back into this plugin). */
 export function webhookUrl(): string {
-  return `${window.location.origin}${RESOURCE_BASE_URL}/webhook`;
+  // Build from Grafana's configured app URL (scheme + host + sub-path) instead of
+  // window.location.origin, which drops the sub-path on reverse-proxy/sub-path
+  // installs and would point the provisioned contact point at a 404.
+  const base = config.appUrl.replace(/\/+$/, '');
+  return `${base}${RESOURCE_BASE_URL}/webhook`;
 }
 
 async function findServiceAccountId(name: string): Promise<number | undefined> {
@@ -148,26 +203,64 @@ async function ensureServiceAccount(): Promise<number> {
   return created.id;
 }
 
-async function createServiceAccountToken(saId: number): Promise<string> {
+async function createServiceAccountToken(saId: number): Promise<TokenResponse> {
   // Token names must be unique per service account; suffix so re-running Connect
   // (e.g. to rotate the secret) never collides with a previously-issued token.
-  const tokenName = `${WEBHOOK_SA_NAME}-${Date.now()}`;
-  const res = await getBackendSrv().post<TokenResponse>(
+  const tokenName = `${WEBHOOK_SA_TOKEN_PREFIX}${Date.now()}`;
+  return getBackendSrv().post<TokenResponse>(
     `/api/serviceaccounts/${saId}/tokens`,
     { name: tokenName },
     { showErrorAlert: false }
   );
-  return res.key;
+}
+
+async function revokeStaleWebhookTokens(saId: number, keepTokenId: number): Promise<void> {
+  try {
+    const tokens = await getBackendSrv().get<TokenDTO[]>(
+      `/api/serviceaccounts/${saId}/tokens`,
+      undefined,
+      undefined,
+      { showErrorAlert: false }
+    );
+    const stale = (tokens ?? []).filter(
+      (t) => t.id !== keepTokenId && typeof t.name === 'string' && t.name.startsWith(WEBHOOK_SA_TOKEN_PREFIX)
+    );
+    for (const t of stale) {
+      try {
+        await getBackendSrv().delete(`/api/serviceaccounts/${saId}/tokens/${t.id}`, undefined, {
+          showErrorAlert: false,
+        });
+      } catch (e) {
+        console.warn('PushWard: failed to revoke stale webhook token', t.id, e);
+      }
+    }
+  } catch (e) {
+    console.warn('PushWard: could not list service-account tokens for cleanup', e);
+  }
 }
 
 async function saveWebhookToken(token: string, enabled: boolean, pinned: boolean): Promise<void> {
+  // Grafana replaces jsonData wholesale on a settings POST (only omitted
+  // secureJsonData keys are preserved). The Connect flow has no jsonData of its
+  // own, so read the current jsonData and resend it unchanged; otherwise
+  // connecting would wipe the datasource, widget config, and bridge settings the
+  // user saved on the Configuration page. If the read fails we throw rather than
+  // POST a blank jsonData, so a failure surfaces instead of silently wiping.
+  const current = await getBackendSrv().get<{ jsonData?: Record<string, unknown> }>(
+    `/api/plugins/${PLUGIN_ID}/settings`,
+    undefined,
+    undefined,
+    { showErrorAlert: false }
+  );
+  const jsonData = current?.jsonData ?? {};
+
   // Send enabled/pinned so the settings POST doesn't disable the plugin (the
-  // command's Enabled field is a non-pointer bool — omitting it means false).
+  // command's Enabled field is a non-pointer bool, so omitting it means false).
   await lastValueFrom(
     getBackendSrv().fetch({
       url: `/api/plugins/${PLUGIN_ID}/settings`,
       method: 'POST',
-      data: { enabled, pinned, secureJsonData: { webhookToken: token } },
+      data: { enabled, pinned, jsonData, secureJsonData: { webhookToken: token } },
       showErrorAlert: false,
     })
   );
@@ -217,7 +310,12 @@ async function upsertContactPoint(token: string): Promise<void> {
  */
 export async function connectToAlerting(enabled: boolean, pinned: boolean): Promise<void> {
   const saId = await ensureServiceAccount();
-  const token = await createServiceAccountToken(saId);
-  await saveWebhookToken(token, enabled, pinned);
-  await upsertContactPoint(token);
+  const created = await createServiceAccountToken(saId);
+  await saveWebhookToken(created.key, enabled, pinned);
+  await upsertContactPoint(created.key);
+  // Revoke older webhook tokens only after the new one is persisted AND wired
+  // into the contact point, so a valid token is always in place and a failure
+  // mid-flow never leaves the contact point pointing at a revoked secret.
+  // Best-effort: never touch the token just minted, never let cleanup abort the flow.
+  await revokeStaleWebhookTokens(saId, created.id);
 }

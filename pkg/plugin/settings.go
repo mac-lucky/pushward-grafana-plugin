@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
+
+	"github.com/mac-lucky/pushward-grafana-plugin/pkg/plugin/widgets"
 )
 
 // Default configuration values. These mirror the contract and the standalone
@@ -48,6 +50,15 @@ type Settings struct {
 	Scale           string
 	Decimals        int
 
+	// Widgets are the scheduled-PromQL widget specs published to the server
+	// widget API. Empty when no widgets are configured (the engine stays off).
+	Widgets []widgets.WidgetConfig
+	// WidgetsError holds a non-empty message when the widgets jsonData failed
+	// to parse/validate. The engine stays off and the message is surfaced on
+	// /config and /healthz, but the timeline path is unaffected: one bad
+	// widget config must not dark the whole plugin.
+	WidgetsError string
+
 	// Secrets — never echoed by /config or logged.
 	APIKey       string
 	WebhookToken string
@@ -69,6 +80,10 @@ type rawJSONData struct {
 	Smoothing       *bool  `json:"smoothing"`
 	Scale           string `json:"scale"`
 	Decimals        *int   `json:"decimals"`
+	// Widgets is the raw widget array, parsed + validated by the widgets
+	// package. Kept as RawMessage so a malformed entry yields a precise
+	// per-widget error instead of failing the whole jsonData unmarshal.
+	Widgets json.RawMessage `json:"widgets"`
 }
 
 // LoadSettings parses an AppInstanceSettings into a Settings with all defaults
@@ -103,6 +118,15 @@ func LoadSettings(s backend.AppInstanceSettings) (*Settings, error) {
 	}
 	if raw.Decimals != nil {
 		out.Decimals = *raw.Decimals
+	}
+
+	// Parse widgets out of band: a malformed entry must not fail the whole
+	// settings load (which would dark the timeline path too). On error the
+	// engine stays off and the message is surfaced to the UI.
+	if w, werr := widgets.ParseWidgets(raw.Widgets); werr != nil {
+		out.WidgetsError = werr.Error()
+	} else {
+		out.Widgets = w
 	}
 
 	if s.DecryptedSecureJSONData != nil {

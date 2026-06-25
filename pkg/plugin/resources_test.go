@@ -23,15 +23,22 @@ func (s *mockCallResourceResponseSender) Send(response *backend.CallResourceResp
 	return nil
 }
 
-// newTestApp builds an App pointed at a stub PushWard server whose GET /me
+// newTestApp builds an App pointed at a stub PushWard server whose GET /auth/me
 // accepts testAPIKey, so the health probe resolves without real network access.
-// It returns the app and the stub's base URL.
+// The stub also 404s GET /me (the wrong path the probe used to call) so the
+// regression guard can assert the probe no longer depends on it. It returns the
+// app and the stub's base URL.
 func newTestApp(t *testing.T) (*App, string) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/me" && r.Header.Get("Authorization") == "Bearer "+testAPIKey {
+		// /me never existed at the gateway; only /auth/me is real.
+		if r.URL.Path == "/auth/me" && r.Header.Get("Authorization") == "Bearer "+testAPIKey {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"id":"test"}`))
+			return
+		}
+		if r.URL.Path == "/me" {
+			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		w.WriteHeader(http.StatusUnauthorized)

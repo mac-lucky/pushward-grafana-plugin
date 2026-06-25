@@ -2,8 +2,10 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -14,9 +16,11 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend/resource/httpadapter"
 	sdkconfig "github.com/grafana/grafana-plugin-sdk-go/config"
 	"github.com/mac-lucky/pushward-integrations/shared/pushward"
+	sharedwidgets "github.com/mac-lucky/pushward-integrations/shared/widgets"
 
 	"github.com/mac-lucky/pushward-grafana-plugin/pkg/plugin/bridge"
 	"github.com/mac-lucky/pushward-grafana-plugin/pkg/plugin/grafanaapi"
+	"github.com/mac-lucky/pushward-grafana-plugin/pkg/plugin/widgets"
 )
 
 // Ensure App implements the SDK interfaces it relies on. CallResource is served
@@ -42,7 +46,29 @@ type App struct {
 	delivery *DeliveryLog
 	metrics  *bridgeMetrics
 
-	httpClient *http.Client // PushWard passthrough (/me, /activities)
+	// Widget engine: the scheduled-PromQL publisher (shared/widgets.Manager).
+	// widgetCancel cancels its poll context; widgetWG tracks the goroutine that
+	// owns Start + Wait so Dispose can cancel and drain it deterministically.
+	// widgetMu guards the publish-status fields, which the goroutine writes and
+	// /healthz reads so the UI badge reflects whether widgets are *actually*
+	// publishing rather than merely being configured.
+	widgetCancel     context.CancelFunc
+	widgetWG         sync.WaitGroup
+	widgetMu         sync.Mutex
+	widgetPublishing bool
+	widgetStatusMsg  string
+
+	httpClient *http.Client // PushWard passthrough (/auth/me, /activities, /widgets)
+
+	// probe cache: dedupes the blocking GET /auth/me round-trip across the rapid
+	// CheckHealth + /healthz calls a single Overview/config page load fires. The
+	// result is reused for probeCacheTTL; the plugin instance is recreated on any
+	// settings change, so the key can never change underneath a cached result.
+	probeMu     sync.Mutex
+	probeAt     time.Time
+	probeStat   probeStatus
+	probeDetail string
+	probeCached bool
 
 	// Grafana connection: app URL + the IAM external service-account token,
 	// refreshed from every request's GrafanaConfig. grafanaTok is the IAM token
@@ -91,11 +117,115 @@ func NewApp(ctx context.Context, settings backend.AppInstanceSettings) (instance
 	// refreshed on every CallResource/CheckHealth regardless.
 	app.refreshGrafanaConn(ctx)
 
+	app.startWidgetEngine(querier)
+
 	mux := http.NewServeMux()
 	app.registerRoutes(mux)
 	app.resource = httpadapter.New(mux)
 
 	return app, nil
+}
+
+// setWidgetStatus records whether the widget engine is actively publishing and a
+// human-readable reason when it is not, so /healthz reports the true state rather
+// than mere config presence.
+func (a *App) setWidgetStatus(publishing bool, msg string) {
+	a.widgetMu.Lock()
+	a.widgetPublishing = publishing
+	a.widgetStatusMsg = msg
+	a.widgetMu.Unlock()
+}
+
+// widgetStatus reports whether widgets are publishing plus a status/error
+// message. An empty message with publishing=false means simply "no widgets
+// configured" (idle, not an error); a non-empty message means configured widgets
+// cannot publish yet and explains why.
+func (a *App) widgetStatus() (publishing bool, msg string) {
+	if a.settings.WidgetsError != "" {
+		return false, "widget config invalid: " + a.settings.WidgetsError
+	}
+	if len(a.settings.Widgets) == 0 {
+		return false, ""
+	}
+	a.widgetMu.Lock()
+	defer a.widgetMu.Unlock()
+	return a.widgetPublishing, a.widgetStatusMsg
+}
+
+// startWidgetEngine builds the scheduled-PromQL widget manager from the parsed
+// widget config and runs it in a single owned goroutine (Start then Wait), so
+// Dispose can cancel its context and drain it without racing the initial polls.
+// It never fails plugin construction (the timeline path stays up) and records a
+// publish status the UI can surface honestly.
+//
+// The engine is gated on a datasource AND a datasource-proxy token being present:
+// widgets poll through the proxy, so starting before the Connect wizard has run
+// would publish empty placeholder widgets to the user's device and log a failure
+// every interval. When the gate isn't met the engine stays off with an
+// explanatory status; Grafana recreates the instance on the next settings save
+// (which is exactly when a datasource pick or Connect run lands), re-running this
+// with the gate satisfied.
+func (a *App) startWidgetEngine(querier *dsQuerier) {
+	if a.settings.WidgetsError != "" {
+		slog.Error("widget config invalid; widget engine disabled", "error", a.settings.WidgetsError)
+		return // widgetStatus() reports the parse error directly from settings
+	}
+	if len(a.settings.Widgets) == 0 {
+		return
+	}
+	if a.settings.APIKey == "" {
+		// Publishing needs the hlk_ key; without it every poll would query the
+		// datasource and then fail the CreateWidget/PATCH against PushWard. Stay
+		// off until the key is set (saving it recreates this instance).
+		a.setWidgetStatus(false, "set the PushWard API key to publish widgets")
+		return
+	}
+	if a.settings.DatasourceUID == "" {
+		a.setWidgetStatus(false, "select a datasource to start publishing widgets")
+		return
+	}
+	if !a.historyTokenAvailable() {
+		a.setWidgetStatus(false, "run the Connect wizard to authorize datasource queries for widgets")
+		return
+	}
+	specs, err := widgets.BuildSpecs(a.settings.Widgets, querier)
+	if err != nil {
+		a.setWidgetStatus(false, "building widget specs failed: "+err.Error())
+		slog.Error("building widget specs failed; widget engine disabled", "error", err)
+		return
+	}
+	mgr, err := sharedwidgets.New(a.pw, specs, slog.Default())
+	if err != nil {
+		a.setWidgetStatus(false, "creating widget manager failed: "+err.Error())
+		slog.Error("creating widget manager failed; widget engine disabled", "error", err)
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.widgetCancel = cancel
+	a.setWidgetStatus(false, "widget engine starting")
+	a.widgetWG.Add(1)
+	go func() {
+		defer a.widgetWG.Done()
+		// Claim "publishing" only once Start succeeds. Start runs each widget's
+		// first poll + CreateWidget synchronously, so a rejected key (e.g. one
+		// missing the "widgets" scope, which 403s the create) surfaces here and
+		// the status reflects it instead of staying optimistically green. The one
+		// residual gap: a gauge/progress widget with no data at startup defers its
+		// create out of Start, so a later persistent failure on that lone widget
+		// is logged rather than reflected in the badge.
+		if err := mgr.Start(ctx); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				slog.Error("widget manager start failed", "error", err)
+				a.setWidgetStatus(false, "widget publishing failed: "+err.Error())
+			}
+		} else {
+			a.setWidgetStatus(true, "")
+		}
+		// Block until every poll goroutine exits (after cancel), so widgetWG.Wait
+		// in Dispose is a true drain.
+		mgr.Wait()
+	}()
+	slog.Info("widget engine started", "widgets", len(a.settings.Widgets))
 }
 
 // CallResource refreshes the Grafana connection from the request context, then
@@ -106,9 +236,14 @@ func (a *App) CallResource(ctx context.Context, req *backend.CallResourceRequest
 	return a.resource.CallResource(ctx, req, sender)
 }
 
-// Dispose stops the bridge (sweeper/checker/pollers, draining in-flight work)
-// and the Grafana API cache goroutine when Grafana recreates the instance.
+// Dispose stops the bridge (sweeper/checker/pollers, draining in-flight work),
+// the widget engine (poll goroutines), and the Grafana API cache goroutine when
+// Grafana recreates the instance.
 func (a *App) Dispose() {
+	if a.widgetCancel != nil {
+		a.widgetCancel()
+	}
+	a.widgetWG.Wait()
 	if a.bridge != nil {
 		a.bridge.Stop()
 	}
@@ -117,15 +252,33 @@ func (a *App) Dispose() {
 	}
 }
 
+// probeStatus is the tri-state result of validating the PushWard key. It keeps
+// a "reachable but ambiguous" outcome (a 404/5xx/transport blip) distinct from
+// an outright-rejected key so a transient hiccup never reds the key as invalid.
+type probeStatus int
+
+const (
+	probeValid    probeStatus = iota // 2xx: key present and accepted
+	probeRejected                    // 401/403: key present but rejected
+	probeUnknown                     // reachable but ambiguous (404/5xx/transport blip)
+	probeUnset                       // no key configured at all (a definite misconfig)
+)
+
 // CheckHealth reports configuration readiness: the PushWard key must be present
 // and accepted by api.pushward.app, and a datasource is required for timeline
 // history (a missing datasource degrades to plain notifications, not an error).
 func (a *App) CheckHealth(ctx context.Context, _ *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
 	a.refreshGrafanaConn(ctx)
 
-	keyOK, detail := a.probeAPIKey(ctx)
-	if !keyOK {
+	switch status, detail := a.probeAPIKeyCached(ctx); status {
+	case probeRejected, probeUnset:
+		// A rejected key or no key at all is a definite misconfiguration: report
+		// Error (red) so a keyless/misconfigured plugin trips a health alarm.
 		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: detail}, nil
+	case probeUnknown:
+		// Reachable-but-ambiguous (404/5xx/transport blip): not a confirmed-invalid
+		// key, so report Unknown rather than Error to avoid a false "key rejected".
+		return &backend.CheckHealthResult{Status: backend.HealthStatusUnknown, Message: detail}, nil
 	}
 
 	msg := "PushWard key valid."
@@ -135,30 +288,35 @@ func (a *App) CheckHealth(ctx context.Context, _ *backend.CheckHealthRequest) (*
 	case !a.historyTokenAvailable():
 		msg = "PushWard key valid. Run the Connect wizard to enable timeline history — datasource queries need a Grafana service-account token."
 	}
+	if _, wmsg := a.widgetStatus(); wmsg != "" {
+		msg += " Widgets: " + wmsg + "."
+	}
 	return &backend.CheckHealthResult{Status: backend.HealthStatusOk, Message: msg}, nil
 }
 
-// probeAPIKey verifies the PushWard key by calling GET {apiURL}/me. It returns
-// whether the key is present AND accepted, plus a human-readable detail for the
-// UI. A transport error or non-2xx (other than 401/403) is reported as a
-// reachability problem rather than an outright-invalid key.
-func (a *App) probeAPIKey(ctx context.Context) (ok bool, detail string) {
+// probeAPIKey verifies the PushWard key by calling GET {apiURL}/auth/me, the
+// profile endpoint an hlk_ integration key (activity:update scope) is authorized
+// for. It returns a tri-state status plus a human-readable detail for the UI: a
+// 2xx is valid, a 401/403 is a rejected key, and anything else (a 404/5xx, an
+// unexpected status, a transport error, or an absent key) is "unknown": never
+// reported as outright-invalid, so a gateway blip can't dark the health surface.
+func (a *App) probeAPIKey(ctx context.Context) (status probeStatus, detail string) {
 	if a.settings.APIKey == "" {
-		return false, "PushWard API key not set"
+		return probeUnset, "PushWard API key not set"
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet,
-		strings.TrimRight(a.settings.APIURL, "/")+"/me", nil)
+		strings.TrimRight(a.settings.APIURL, "/")+"/auth/me", nil)
 	if err != nil {
-		return false, "could not build request: " + err.Error()
+		return probeUnknown, "could not build request: " + err.Error()
 	}
 	req.Header.Set("Authorization", "Bearer "+a.settings.APIKey)
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		return false, "could not reach " + a.settings.APIURL
+		return probeUnknown, "could not reach " + a.settings.APIURL
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
@@ -167,12 +325,37 @@ func (a *App) probeAPIKey(ctx context.Context) (ok bool, detail string) {
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
-		return true, ""
+		return probeValid, ""
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		return false, "PushWard rejected the API key"
+		return probeRejected, "PushWard rejected the API key"
 	default:
-		return false, fmt.Sprintf("PushWard returned status %d", resp.StatusCode)
+		return probeUnknown, fmt.Sprintf("PushWard reachable but returned status %d", resp.StatusCode)
 	}
+}
+
+// probeCacheTTL bounds how long a probeAPIKey result is reused. Short enough
+// that fixing a key reflects on the next refresh, long enough to collapse the
+// back-to-back CheckHealth + /healthz calls a single page load fires.
+const probeCacheTTL = 10 * time.Second
+
+// probeAPIKeyCached returns a recent probeAPIKey result when one is still fresh,
+// so opening the Overview and Configuration pages back-to-back does not issue a
+// separate /auth/me round-trip per call for the same unchanged key.
+func (a *App) probeAPIKeyCached(ctx context.Context) (probeStatus, string) {
+	a.probeMu.Lock()
+	if a.probeCached && time.Since(a.probeAt) < probeCacheTTL {
+		st, det := a.probeStat, a.probeDetail
+		a.probeMu.Unlock()
+		return st, det
+	}
+	a.probeMu.Unlock()
+
+	st, det := a.probeAPIKey(ctx)
+
+	a.probeMu.Lock()
+	a.probeStat, a.probeDetail, a.probeAt, a.probeCached = st, det, time.Now(), true
+	a.probeMu.Unlock()
+	return st, det
 }
 
 // CollectMetrics exposes the bridge's Prometheus counters to Grafana.

@@ -19,6 +19,7 @@ import {
   getHistory,
   HistoryEntry,
 } from '../api';
+import { formatRfc3339 } from '../dates';
 import { testIds } from '../components/testIds';
 
 function formatTs(ts: number): string {
@@ -95,7 +96,12 @@ function Activities() {
           <Badge color={original.state === 'ended' ? 'darkgrey' : 'green'} text={original.state ?? 'unknown'} />
         ),
       },
-      { id: 'template', header: 'Template' },
+      {
+        id: 'template',
+        header: 'Template',
+        // The server nests the template under content, not at the top level.
+        cell: ({ row: { original } }) => <span>{original.content?.template ?? '-'}</span>,
+      },
       {
         id: 'priority',
         header: 'Priority',
@@ -104,7 +110,7 @@ function Activities() {
       {
         id: 'updated_at',
         header: 'Updated',
-        cell: ({ row: { original } }) => <span>{original.updated_at ?? '—'}</span>,
+        cell: ({ row: { original } }) => <span>{formatRfc3339(original.updated_at)}</span>,
       },
     ],
     []

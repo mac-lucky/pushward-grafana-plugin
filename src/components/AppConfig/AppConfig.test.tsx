@@ -5,12 +5,14 @@ import AppConfig, { AppConfigProps } from './AppConfig';
 import { testIds } from 'components/testIds';
 
 // DataSourcePicker reaches for getDataSourceSrv() on mount, so stub it (and
-// getBackendSrv, used on submit) to keep the config form a pure render in tests.
+// getBackendSrv, used on submit + the mount effect that fetches /config) to keep
+// the config form a pure render in tests.
 jest.mock('@grafana/runtime', () => ({
   ...jest.requireActual('@grafana/runtime'),
   DataSourcePicker: () => <div data-testid="mock-datasource-picker" />,
   getBackendSrv: () => ({
     fetch: jest.fn(),
+    get: jest.fn().mockResolvedValue({}),
   }),
 }));
 

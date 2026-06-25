@@ -3,7 +3,7 @@ import { css } from '@emotion/css';
 import { GrafanaTheme2 } from '@grafana/data';
 import { PluginPage } from '@grafana/runtime';
 import { Alert, Badge, Icon, LinkButton, LoadingPlaceholder, Stack, useStyles2 } from '@grafana/ui';
-import { ConfigResponse, getConfig, getHealthz, HealthzResponse } from '../api';
+import { ApiKeyStatus, ConfigResponse, getConfig, getHealthz, HealthzResponse } from '../api';
 import { PLUGIN_BASE_URL, PLUGIN_ID, ROUTES } from '../constants';
 import { testIds } from '../components/testIds';
 
@@ -14,6 +14,32 @@ type LoadState =
 
 function statusBadge(ok: boolean, okText: string, badText: string) {
   return <Badge color={ok ? 'green' : 'orange'} icon={ok ? 'check' : 'exclamation-triangle'} text={ok ? okText : badText} />;
+}
+
+// The API-key badge needs more nuance than ok/bad: distinguish a rejected key
+// (red) from a transient 'unknown' probe blip (amber), and from no key at all.
+function apiKeyBadge(status: ApiKeyStatus, keySet: boolean) {
+  if (!keySet) {
+    return <Badge color="orange" icon="exclamation-triangle" text="API key missing" />;
+  }
+  switch (status) {
+    case 'valid':
+      return <Badge color="green" icon="check" text="PushWard API key valid" />;
+    case 'rejected':
+      return <Badge color="red" icon="times-circle" text="API key rejected" />;
+    default:
+      return <Badge color="orange" icon="question-circle" text="API key unverified" />;
+  }
+}
+
+// Widgets are optional: green when actively publishing, neutral grey when idle
+// (none configured) rather than a warning state.
+function widgetsBadge(publishing: boolean) {
+  return publishing ? (
+    <Badge color="green" icon="check" text="Widgets publishing" />
+  ) : (
+    <Badge color="darkgrey" icon="minus-circle" text="Widgets idle" />
+  );
 }
 
 function Overview() {
@@ -74,11 +100,18 @@ function Overview() {
               <div data-testid={testIds.overview.status}>
                 <Stack direction="row" gap={1} wrap="wrap">
                   {statusBadge(state.health.ok, 'Backend healthy', 'Backend degraded')}
-                  {statusBadge(state.config.apiKeySet, 'PushWard API key set', 'API key missing')}
+                  {apiKeyBadge(state.health.apiKeyStatus, state.config.apiKeySet)}
                   {statusBadge(state.health.datasource, 'Datasource configured', 'No datasource')}
+                  {statusBadge(state.health.history, 'Timeline history ready', 'Timeline history unavailable')}
                   {statusBadge(state.config.webhookConnected, 'Alerting connected', 'Not connected')}
+                  {widgetsBadge(state.health.widgets)}
                 </Stack>
               </div>
+              {state.health.widgetsError && (
+                <Alert severity="warning" title="Widget configuration error">
+                  {state.health.widgetsError}
+                </Alert>
+              )}
               {state.health.message && <p className={s.muted}>{state.health.message}</p>}
             </Stack>
           )}

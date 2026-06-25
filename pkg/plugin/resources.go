@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -32,6 +34,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/test", a.handleTest)
 	mux.HandleFunc("/webhook", a.handleWebhook)
 	mux.HandleFunc("/activities", a.handleActivities)
+	mux.HandleFunc("/widgets", a.handleWidgets)
 	mux.HandleFunc("/history", a.handleHistory)
 }
 
@@ -41,34 +44,81 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// requireGet rejects any verb other than GET on a read endpoint, mirroring the
+// explicit POST guards on handleTest/handleWebhook. Returns true when the
+// request may proceed.
+func requireGet(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return false
+	}
+	return true
+}
+
+// listEnvelope is the server's list response shape. NextCursor is empty on the
+// final (or only) page; /widgets is unpaginated and never sets it.
+type listEnvelope struct {
+	Items      []json.RawMessage `json:"items"`
+	NextCursor string            `json:"next_cursor"`
+}
+
 // handleHealthz is the status probe for the UI. It validates the key against
-// api.pushward.app (GET /me), mirroring CheckHealth so the badges and the
-// plugin health page agree.
+// api.pushward.app (GET /auth/me), mirroring CheckHealth so the badges and the
+// plugin health page agree. apiKey is the confirmed-valid flag; apiKeyStatus is
+// the precise tri-state ("valid"/"rejected"/"unknown") so the UI can tell a
+// rejected key from a transient reachability blip.
 func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	apiKeyOK, detail := a.probeAPIKey(r.Context())
+	if !requireGet(w, r) {
+		return
+	}
+	status, detail := a.probeAPIKeyCached(r.Context())
+	keyValid := status == probeValid
 	dsOK := a.settings.DatasourceUID != ""
 	historyOK := dsOK && a.historyTokenAvailable()
+	widgetsPublishing, widgetsMsg := a.widgetStatus()
+
+	statusStr := "unknown"
+	switch status {
+	case probeValid:
+		statusStr = "valid"
+	case probeRejected:
+		statusStr = "rejected"
+	}
+
 	msg := "ok"
 	switch {
-	case !apiKeyOK:
+	case status != probeValid:
 		msg = detail
 	case !dsOK:
 		msg = "No datasource selected (timeline history disabled)"
 	case !historyOK:
 		msg = "Datasource selected, but timeline history is disabled — run the Connect wizard to authorize datasource queries"
 	}
+	// Benign widget setup states (no datasource/key yet, engine starting) ride in
+	// the message text; only a genuine parse/validate failure populates the
+	// dedicated widgetsError field that the UI renders as a configuration error.
+	if a.settings.WidgetsError == "" && widgetsMsg != "" {
+		msg += " | Widgets: " + widgetsMsg
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":         apiKeyOK,
-		"apiKey":     apiKeyOK,
-		"datasource": dsOK,
-		"history":    historyOK,
-		"message":    msg,
+		"ok":           keyValid,
+		"apiKey":       keyValid,
+		"apiKeyStatus": statusStr,
+		"datasource":   dsOK,
+		"history":      historyOK,
+		"widgets":      widgetsPublishing,
+		"widgetsError": a.settings.WidgetsError,
+		"message":      msg,
 	})
 }
 
 // handleConfig echoes the non-secret configuration plus connection status. It
 // never returns the API key or webhook token.
-func (a *App) handleConfig(w http.ResponseWriter, _ *http.Request) {
+func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if !requireGet(w, r) {
+		return
+	}
 	s := a.settings
 	writeJSON(w, http.StatusOK, map[string]any{
 		"apiUrl":           s.APIURL,
@@ -83,6 +133,8 @@ func (a *App) handleConfig(w http.ResponseWriter, _ *http.Request) {
 		"smoothing":        s.Smoothing,
 		"scale":            s.Scale,
 		"decimals":         s.Decimals,
+		"widgetCount":      len(s.Widgets),
+		"widgetsError":     s.WidgetsError,
 		"apiKeySet":        s.APIKey != "",
 		"webhookConnected": s.WebhookToken != "",
 		"webhookUrl":       webhookResourcePath,
@@ -201,38 +253,96 @@ func (a *App) handleWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleActivities proxies the user's current Live Activities from PushWard.
+// GET /activities is cursor-paginated via the opaque `after` token.
 func (a *App) handleActivities(w http.ResponseWriter, r *http.Request) {
+	a.proxyList(w, r, "/activities", "activities", "after")
+}
+
+// handleWidgets proxies the user's current PushWard widgets, so the Widgets
+// management page can list what the engine is publishing. GET /widgets is
+// unpaginated (no cursor), so it is fetched in a single request.
+func (a *App) handleWidgets(w http.ResponseWriter, r *http.Request) {
+	a.proxyList(w, r, "/widgets", "widgets", "")
+}
+
+// proxyList GETs a PushWard list endpoint and returns its items as a bare array
+// under responseKey, so the frontend always receives `{responseKey: [...]}`.
+// When cursorParam is non-empty the endpoint is cursor-paginated (/activities
+// uses "after"): every page is followed and concatenated so the management table
+// is never silently truncated to the first server page. Read-only; GET-only.
+func (a *App) proxyList(w http.ResponseWriter, r *http.Request, upstreamPath, responseKey, cursorParam string) {
+	if !requireGet(w, r) {
+		return
+	}
 	if a.settings.APIKey == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "PushWard API key not set"})
 		return
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
-		strings.TrimRight(a.settings.APIURL, "/")+"/activities", nil)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+a.settings.APIKey)
 
-	resp, err := a.httpClient.Do(req)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
+	base := strings.TrimRight(a.settings.APIURL, "/") + upstreamPath
+	items := []json.RawMessage{}
+	cursor := ""
+	// Safety bound: at the 100-item server page cap this covers 5,000 items, far
+	// past any real per-user activity/widget count, while preventing an unbounded
+	// loop if the server ever returned a self-referential cursor.
+	const maxPages = 50
+	for page := 0; page < maxPages; page++ {
+		u := base
+		if cursorParam != "" {
+			q := url.Values{"limit": {"100"}}
+			if cursor != "" {
+				q.Set(cursorParam, cursor)
+			}
+			u += "?" + q.Encode()
+		}
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode != http.StatusOK {
-		writeJSON(w, resp.StatusCode, map[string]any{"error": strings.TrimSpace(string(body))})
-		return
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u, nil)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+a.settings.APIKey)
+
+		resp, err := a.httpClient.Do(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			writeJSON(w, resp.StatusCode, map[string]any{"error": strings.TrimSpace(string(body))})
+			return
+		}
+
+		var env listEnvelope
+		if err := json.Unmarshal(body, &env); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "unexpected list response from PushWard"})
+			return
+		}
+		for _, it := range env.Items {
+			if t := bytes.TrimSpace(it); len(t) > 0 && !bytes.Equal(t, []byte("null")) {
+				items = append(items, it)
+			}
+		}
+		// Stop on the last page, on an unpaginated endpoint, or if the server
+		// echoed the same cursor (defensive: would otherwise loop).
+		if cursorParam == "" || env.NextCursor == "" || env.NextCursor == cursor {
+			break
+		}
+		cursor = env.NextCursor
+		if page == maxPages-1 {
+			slog.Warn("proxyList page cap reached; list may be truncated", "path", upstreamPath, "pages", maxPages)
+		}
 	}
-	if len(body) == 0 || !json.Valid(body) {
-		body = []byte("[]")
-	}
-	writeJSON(w, http.StatusOK, map[string]json.RawMessage{"activities": json.RawMessage(body)})
+
+	writeJSON(w, http.StatusOK, map[string]any{responseKey: items})
 }
 
 // handleHistory returns the backend's recent delivery log (newest first).
-func (a *App) handleHistory(w http.ResponseWriter, _ *http.Request) {
+func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
+	if !requireGet(w, r) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": a.delivery.Entries()})
 }

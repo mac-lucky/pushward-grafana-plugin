@@ -1,4 +1,4 @@
-import React, { ChangeEvent, FormEvent, useState } from 'react';
+import React, { ChangeEvent, FormEvent, useEffect, useState } from 'react';
 import { lastValueFrom } from 'rxjs';
 import { css } from '@emotion/css';
 import {
@@ -17,10 +17,21 @@ import {
   Input,
   SecretInput,
   Switch,
+  TextArea,
   useStyles2,
   type ComboboxOption,
 } from '@grafana/ui';
+import { getConfig } from '../../api';
 import { testIds } from '../testIds';
+
+// One widget definition. Mirrors the standalone bridge's widget config; kept loose
+// here because the backend owns validation - the form only round-trips the JSON.
+export type WidgetConfig = {
+  slug: string;
+  name?: string;
+  template: string;
+  [key: string]: unknown;
+};
 
 export type AppPluginSettings = {
   apiUrl?: string;
@@ -35,6 +46,7 @@ export type AppPluginSettings = {
   smoothing?: boolean;
   scale?: string;
   decimals?: number;
+  widgets?: WidgetConfig[];
 };
 
 const DEFAULTS: Required<AppPluginSettings> = {
@@ -50,6 +62,7 @@ const DEFAULTS: Required<AppPluginSettings> = {
   smoothing: true,
   scale: 'linear',
   decimals: 1,
+  widgets: [],
 };
 
 const SCALE_OPTIONS: Array<ComboboxOption<string>> = [
@@ -57,11 +70,49 @@ const SCALE_OPTIONS: Array<ComboboxOption<string>> = [
   { label: 'Logarithmic', value: 'logarithmic' },
 ];
 
+// Two-widget starter: a stat_list and a gauge. The PromQL is placeholder - the
+// user edits it for their own metrics. Icons are SF Symbol names (rendered by
+// the iOS app), not Grafana UI icon ids.
+const WIDGET_EXAMPLE = JSON.stringify(
+  [
+    {
+      slug: 'pushward-stats',
+      name: 'PushWard',
+      template: 'stat_list',
+      interval: '60s',
+      update_mode: 'on_change',
+      stat_rows: [
+        { label: 'Up targets', query: 'count(up == 1)', value_template: '{{ .Value }}' },
+        { label: 'Total targets', query: 'count(up)', value_template: '{{ .Value }}' },
+      ],
+      content: { icon: 'chart.bar.fill', subtitle: 'Cluster health' },
+    },
+    {
+      slug: 'pushward-http-5xx-rate',
+      name: 'HTTP 5xx',
+      template: 'gauge',
+      query: 'vector(0)',
+      interval: '1h',
+      min_change: 0.05,
+      content: { unit: 'req/s', severity: 'warning', min_value: 0, max_value: 2 },
+    },
+  ],
+  null,
+  2
+);
+
 type State = AppPluginSettings & {
   // New API key value being entered (write-only; never read back from Grafana).
   apiKey: string;
   isApiKeySet: boolean;
   isWebhookTokenSet: boolean;
+  // Raw text of the widgets JSON editor, plus the last client-side parse error.
+  widgetsText: string;
+  widgetsError?: string;
+  // The backend's parse/validate error for the currently-saved config, fetched
+  // on mount so a semantic error (duplicate slug, bad interval, unknown field)
+  // the Go validator catches is shown here, not only on the Overview page.
+  backendWidgetsError?: string;
 };
 
 export interface AppConfigProps extends PluginConfigPageProps<AppPluginMeta<AppPluginSettings>> {}
@@ -86,9 +137,30 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     apiKey: '',
     isApiKeySet: Boolean(secureJsonFields?.apiKey),
     isWebhookTokenSet: Boolean(secureJsonFields?.webhookToken),
+    widgetsText: jsonData?.widgets?.length ? JSON.stringify(jsonData.widgets, null, 2) : '',
+    widgetsError: undefined,
   });
 
   const isSubmitDisabled = !state.apiUrl;
+
+  // Surface the backend's parse/validate result for the saved widget config, so
+  // an error only the Go validator catches lands on the widgets editor here
+  // rather than being discovered later on the Overview page. Best-effort.
+  useEffect(() => {
+    let active = true;
+    getConfig()
+      .then((cfg) => {
+        if (active && cfg.widgetsError) {
+          setState((prev) => ({ ...prev, backendWidgetsError: cfg.widgetsError }));
+        }
+      })
+      .catch(() => {
+        /* non-fatal: the inline backend-error hint is best-effort */
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const onChangeText = (event: ChangeEvent<HTMLInputElement>) => {
     setState({ ...state, [event.target.name]: event.target.value });
@@ -101,10 +173,38 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
 
   const onResetApiKey = () => setState({ ...state, apiKey: '', isApiKeySet: false });
 
+  const onChangeWidgets = (event: ChangeEvent<HTMLTextAreaElement>) => {
+    // Clear any stale parse error (client and backend) as the user edits.
+    setState({ ...state, widgetsText: event.target.value, widgetsError: undefined, backendWidgetsError: undefined });
+  };
+
+  const onLoadWidgetExample = () =>
+    setState({ ...state, widgetsText: WIDGET_EXAMPLE, widgetsError: undefined, backendWidgetsError: undefined });
+
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (isSubmitDisabled) {
       return;
+    }
+
+    // Parse the widgets editor: empty -> [], a JSON array -> save it, anything
+    // else -> block the submit and surface an inline error rather than persist
+    // malformed config.
+    let widgets: WidgetConfig[] = [];
+    const raw = state.widgetsText.trim();
+    if (raw !== '') {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (e) {
+        setState({ ...state, widgetsError: e instanceof Error ? e.message : 'Invalid JSON.' });
+        return;
+      }
+      if (!Array.isArray(parsed)) {
+        setState({ ...state, widgetsError: 'Widgets must be a JSON array.' });
+        return;
+      }
+      widgets = parsed as WidgetConfig[];
     }
 
     updatePluginAndReload(plugin.meta.id, {
@@ -123,6 +223,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         smoothing: state.smoothing,
         scale: state.scale,
         decimals: state.decimals,
+        widgets,
       },
       // Only send the secret when the user typed a new one — never overwrite a
       // previously-stored key with an empty value.
@@ -301,6 +402,39 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
             onChange={(e) => setState({ ...state, smoothing: e.currentTarget.checked })}
           />
         </Field>
+      </FieldSet>
+
+      <FieldSet label="Widgets">
+        <Field
+          label="Widget definitions (JSON)"
+          description={
+            'A JSON array of widgets published to PushWard as standalone Live Activities. Each entry: ' +
+            '{ slug, name?, template, query?/query_all?, stat_rows?, interval?, update_mode?, min_change?, content? }. ' +
+            'Leave empty to publish none. Publishing requires the integration key to have the "widgets" scope and a datasource selected above.'
+          }
+          invalid={Boolean(state.widgetsError || state.backendWidgetsError)}
+          error={state.widgetsError ?? state.backendWidgetsError}
+        >
+          <TextArea
+            id="config-widgets"
+            data-testid={testIds.appConfig.widgets}
+            rows={12}
+            value={state.widgetsText}
+            placeholder='[ { "slug": "my-widget", "name": "My widget", "template": "stat_list", "stat_rows": [] } ]'
+            onChange={onChangeWidgets}
+          />
+        </Field>
+        <div className={s.marginTop}>
+          <Button
+            type="button"
+            variant="secondary"
+            icon="file-alt"
+            data-testid={testIds.appConfig.widgetsExample}
+            onClick={onLoadWidgetExample}
+          >
+            Load example
+          </Button>
+        </div>
       </FieldSet>
 
       <div className={s.marginTop}>
