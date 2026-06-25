@@ -48,6 +48,13 @@
       "path": "/plugins/%PLUGIN_ID%",
       "role": "Admin",
       "addToNav": true
+    },
+    {
+      "type": "dashboard",
+      "name": "PushWard Delivery",
+      "path": "dashboards/delivery.json",
+      "addToNav": false,
+      "defaultNav": false
     }
   ],
   "iam": {
