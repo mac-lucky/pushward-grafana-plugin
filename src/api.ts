@@ -2,6 +2,27 @@ import { lastValueFrom } from 'rxjs';
 import { config, getBackendSrv } from '@grafana/runtime';
 import { PLUGIN_ID, RESOURCE_BASE_URL } from './constants';
 
+// Normalize an error from a backend call into a human string. getBackendSrv
+// rejects with a fetch-response-like object (not an Error), so unwrap its
+// `data.message`/`statusText` before falling back to String(e) - otherwise the
+// UI would render "[object Object]".
+export function errorMessage(e: unknown): string {
+  if (e instanceof Error) {
+    return e.message;
+  }
+  if (e && typeof e === 'object') {
+    const data = (e as { data?: { message?: string } }).data;
+    if (data?.message) {
+      return data.message;
+    }
+    const statusText = (e as { statusText?: string }).statusText;
+    if (statusText) {
+      return statusText;
+    }
+  }
+  return String(e);
+}
+
 // ---------------------------------------------------------------------------
 // Backend resource responses (see the Go backend's /resources routes).
 // ---------------------------------------------------------------------------
@@ -136,7 +157,7 @@ export function sendTest(kind: TestKind): Promise<TestResponse> {
 }
 
 // ---------------------------------------------------------------------------
-// Connect wizard provisioning — runs against Grafana's own API with the
+// Connect wizard provisioning - runs against Grafana's own API with the
 // admin's session. Creates a service account + token, persists the token to
 // plugin settings, and upserts a "PushWard" webhook contact point that loops
 // alerts back into this plugin's /resources/webhook endpoint.

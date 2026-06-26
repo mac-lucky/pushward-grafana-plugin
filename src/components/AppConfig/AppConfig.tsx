@@ -12,16 +12,19 @@ import { DataSourcePicker, getBackendSrv } from '@grafana/runtime';
 import {
   Button,
   Combobox,
+  ControlledCollapse,
   Field,
   FieldSet,
   Input,
   SecretInput,
   Switch,
+  Text,
   TextArea,
   useStyles2,
   type ComboboxOption,
 } from '@grafana/ui';
 import { getConfig } from '../../api';
+import { CONNECT_HREF } from '../../constants';
 import { testIds } from '../testIds';
 
 // One widget definition. Mirrors the standalone bridge's widget config; kept loose
@@ -69,6 +72,11 @@ const SCALE_OPTIONS: Array<ComboboxOption<string>> = [
   { label: 'Linear', value: 'linear' },
   { label: 'Logarithmic', value: 'logarithmic' },
 ];
+
+// Consistent field widths so the form columns line up: wider for free text,
+// narrower for numbers and durations.
+const TEXT_WIDTH = 40;
+const NUM_WIDTH = 24;
 
 // Two-widget starter: a stat_list and a gauge. The PromQL is placeholder - the
 // user edits it for their own metrics. Icons are SF Symbol names (rendered by
@@ -225,18 +233,29 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         decimals: state.decimals,
         widgets,
       },
-      // Only send the secret when the user typed a new one — never overwrite a
+      // Only send the secret when the user typed a new one - never overwrite a
       // previously-stored key with an empty value.
       secureJsonData: state.isApiKeySet ? undefined : { apiKey: state.apiKey },
     });
   };
 
   return (
-    <form onSubmit={onSubmit} data-testid={testIds.appConfig.container}>
+    <form onSubmit={onSubmit} data-testid={testIds.appConfig.container} className={s.form}>
+      <div className={s.intro}>
+        <Text color="secondary">
+          Two-step setup: set your PushWard API key and history datasource here, then provision the webhook contact point
+          on the{' '}
+          <a className={s.link} href={CONNECT_HREF}>
+            Connect
+          </a>{' '}
+          page.
+        </Text>
+      </div>
+
       <FieldSet label="PushWard API">
         <Field label="API key" description="Your PushWard integration key (hlk_…). Used as the Bearer token for api.pushward.app.">
           <SecretInput
-            width={60}
+            width={TEXT_WIDTH}
             id="config-api-key"
             data-testid={testIds.appConfig.apiKey}
             name="apiKey"
@@ -250,7 +269,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
 
         <Field label="API URL" description="PushWard API base URL.">
           <Input
-            width={60}
+            width={TEXT_WIDTH}
             name="apiUrl"
             id="config-api-url"
             data-testid={testIds.appConfig.apiUrl}
@@ -265,7 +284,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
           description="The Grafana service-account token embedded in the PushWard contact point. Set this from the Connect page."
         >
           <Input
-            width={60}
+            width={TEXT_WIDTH}
             disabled
             value={state.isWebhookTokenSet ? 'Configured — managed by the Connect page' : 'Not set — use the Connect page'}
           />
@@ -281,7 +300,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
             <DataSourcePicker
               current={state.datasourceUid || null}
               noDefault
-              width={40}
+              width={TEXT_WIDTH}
               filter={(ds: DataSourceInstanceSettings) =>
                 ds.type === 'prometheus' || ds.type === 'victoriametrics-metrics-datasource'
               }
@@ -295,7 +314,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
       <FieldSet label="Timeline behaviour">
         <Field label="Severity label" description="Alert label that carries severity.">
           <Input
-            width={40}
+            width={TEXT_WIDTH}
             name="severityLabel"
             data-testid={testIds.appConfig.severityLabel}
             value={state.severityLabel}
@@ -306,7 +325,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
 
         <Field label="Default severity" description="Severity used when the label is absent.">
           <Input
-            width={40}
+            width={TEXT_WIDTH}
             name="defaultSeverity"
             data-testid={testIds.appConfig.defaultSeverity}
             value={state.defaultSeverity}
@@ -317,7 +336,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
 
         <Field label="Priority" description="Live Activity priority (0–10).">
           <Input
-            width={20}
+            width={NUM_WIDTH}
             type="number"
             min={0}
             max={10}
@@ -330,7 +349,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
 
         <Field label="History window" description="How far back to query history (Go duration, e.g. 30m).">
           <Input
-            width={20}
+            width={NUM_WIDTH}
             name="historyWindow"
             data-testid={testIds.appConfig.historyWindow}
             value={state.historyWindow}
@@ -339,69 +358,71 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
           />
         </Field>
 
-        <Field label="Poll interval" description="How often firing alerts are re-queried (e.g. 30s).">
-          <Input
-            width={20}
-            name="pollInterval"
-            data-testid={testIds.appConfig.pollInterval}
-            value={state.pollInterval}
-            placeholder={DEFAULTS.pollInterval}
-            onChange={onChangeText}
-          />
-        </Field>
-
-        <Field label="Cleanup delay" description="Delay before a resolved activity is ended (e.g. 15m).">
-          <Input
-            width={20}
-            name="cleanupDelay"
-            data-testid={testIds.appConfig.cleanupDelay}
-            value={state.cleanupDelay}
-            placeholder={DEFAULTS.cleanupDelay}
-            onChange={onChangeText}
-          />
-        </Field>
-
-        <Field label="Stale timeout" description="Max activity lifetime before it is force-ended (e.g. 24h).">
-          <Input
-            width={20}
-            name="staleTimeout"
-            data-testid={testIds.appConfig.staleTimeout}
-            value={state.staleTimeout}
-            placeholder={DEFAULTS.staleTimeout}
-            onChange={onChangeText}
-          />
-        </Field>
-
-        <Field label="Scale" description="Y-axis scale for the timeline chart.">
-          <div data-testid={testIds.appConfig.scale}>
-            <Combobox
-              width={30}
-              options={SCALE_OPTIONS}
-              value={state.scale}
-              onChange={(opt: ComboboxOption<string>) => setState({ ...state, scale: opt.value })}
+        <ControlledCollapse label="Advanced timeline options" isOpen={false}>
+          <Field label="Poll interval" description="How often firing alerts are re-queried (e.g. 30s).">
+            <Input
+              width={NUM_WIDTH}
+              name="pollInterval"
+              data-testid={testIds.appConfig.pollInterval}
+              value={state.pollInterval}
+              placeholder={DEFAULTS.pollInterval}
+              onChange={onChangeText}
             />
-          </div>
-        </Field>
+          </Field>
 
-        <Field label="Decimals" description="Decimal places shown for values.">
-          <Input
-            width={20}
-            type="number"
-            min={0}
-            name="decimals"
-            data-testid={testIds.appConfig.decimals}
-            value={state.decimals}
-            onChange={onChangeNumber}
-          />
-        </Field>
+          <Field label="Cleanup delay" description="Delay before a resolved activity is ended (e.g. 15m).">
+            <Input
+              width={NUM_WIDTH}
+              name="cleanupDelay"
+              data-testid={testIds.appConfig.cleanupDelay}
+              value={state.cleanupDelay}
+              placeholder={DEFAULTS.cleanupDelay}
+              onChange={onChangeText}
+            />
+          </Field>
 
-        <Field label="Smoothing" description="Smooth the timeline chart line.">
-          <Switch
-            data-testid={testIds.appConfig.smoothing}
-            value={state.smoothing}
-            onChange={(e) => setState({ ...state, smoothing: e.currentTarget.checked })}
-          />
-        </Field>
+          <Field label="Stale timeout" description="Max activity lifetime before it is force-ended (e.g. 24h).">
+            <Input
+              width={NUM_WIDTH}
+              name="staleTimeout"
+              data-testid={testIds.appConfig.staleTimeout}
+              value={state.staleTimeout}
+              placeholder={DEFAULTS.staleTimeout}
+              onChange={onChangeText}
+            />
+          </Field>
+
+          <Field label="Scale" description="Y-axis scale for the timeline chart.">
+            <div data-testid={testIds.appConfig.scale}>
+              <Combobox
+                width={TEXT_WIDTH}
+                options={SCALE_OPTIONS}
+                value={state.scale}
+                onChange={(opt: ComboboxOption<string>) => setState({ ...state, scale: opt.value })}
+              />
+            </div>
+          </Field>
+
+          <Field label="Decimals" description="Decimal places shown for values.">
+            <Input
+              width={NUM_WIDTH}
+              type="number"
+              min={0}
+              name="decimals"
+              data-testid={testIds.appConfig.decimals}
+              value={state.decimals}
+              onChange={onChangeNumber}
+            />
+          </Field>
+
+          <Field label="Smoothing" description="Smooth the timeline chart line.">
+            <Switch
+              data-testid={testIds.appConfig.smoothing}
+              value={state.smoothing}
+              onChange={(e) => setState({ ...state, smoothing: e.currentTarget.checked })}
+            />
+          </Field>
+        </ControlledCollapse>
       </FieldSet>
 
       <FieldSet label="Widgets">
@@ -418,6 +439,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
           <TextArea
             id="config-widgets"
             data-testid={testIds.appConfig.widgets}
+            className={s.code}
             rows={12}
             value={state.widgetsText}
             placeholder='[ { "slug": "my-widget", "name": "My widget", "template": "stat_list", "stat_rows": [] } ]'
@@ -437,7 +459,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         </div>
       </FieldSet>
 
-      <div className={s.marginTop}>
+      <div className={s.footer}>
         <Button type="submit" data-testid={testIds.appConfig.submit} disabled={isSubmitDisabled}>
           Save settings
         </Button>
@@ -449,8 +471,25 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
 export default AppConfig;
 
 const getStyles = (theme: GrafanaTheme2) => ({
+  form: css`
+    max-width: 760px;
+  `,
+  intro: css`
+    margin-bottom: ${theme.spacing(3)};
+  `,
+  link: css`
+    color: ${theme.colors.text.link};
+    text-decoration: underline;
+  `,
   marginTop: css`
+    margin-top: ${theme.spacing(2)};
+  `,
+  footer: css`
     margin-top: ${theme.spacing(3)};
+  `,
+  code: css`
+    font-family: ${theme.typography.fontFamilyMonospace};
+    font-size: ${theme.typography.bodySmall.fontSize};
   `,
 });
 

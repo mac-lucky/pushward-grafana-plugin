@@ -1,4 +1,4 @@
-import { connectToAlerting, getActivities, getWidgets, webhookUrl } from './api';
+import { connectToAlerting, errorMessage, getActivities, getWidgets, webhookUrl } from './api';
 import { config, getBackendSrv } from '@grafana/runtime';
 import { of } from 'rxjs';
 
@@ -97,6 +97,30 @@ describe('api', () => {
       expect(settingsPost!.data.jsonData).toEqual(current);
       expect(settingsPost!.data.secureJsonData).toEqual({ webhookToken: 'glsa_token' });
       expect(settingsPost!.data.enabled).toBe(true);
+    });
+  });
+
+  describe('errorMessage', () => {
+    it('uses Error.message', () => {
+      expect(errorMessage(new Error('boom'))).toBe('boom');
+    });
+
+    it('unwraps a getBackendSrv response object via data.message', () => {
+      expect(errorMessage({ data: { message: 'bad request' } })).toBe('bad request');
+    });
+
+    it('falls back to statusText', () => {
+      expect(errorMessage({ status: 500, statusText: 'Internal Server Error' })).toBe('Internal Server Error');
+    });
+
+    it('prefers data.message over statusText', () => {
+      expect(errorMessage({ data: { message: 'detail' }, statusText: 'Bad Request' })).toBe('detail');
+    });
+
+    it('stringifies anything else', () => {
+      expect(errorMessage('plain')).toBe('plain');
+      expect(errorMessage(null)).toBe('null');
+      expect(errorMessage({})).toBe('[object Object]');
     });
   });
 

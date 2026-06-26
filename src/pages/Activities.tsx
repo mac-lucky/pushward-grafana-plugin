@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { css } from '@emotion/css';
-import { dateTimeFormat, GrafanaTheme2 } from '@grafana/data';
+import { GrafanaTheme2 } from '@grafana/data';
 import { PluginPage } from '@grafana/runtime';
 import {
   Alert,
@@ -8,28 +8,17 @@ import {
   Button,
   EmptyState,
   InteractiveTable,
+  LinkButton,
   LoadingPlaceholder,
-  Stack,
+  Text,
   useStyles2,
   type Column,
 } from '@grafana/ui';
-import {
-  ActivitySummary,
-  getActivities,
-  getHistory,
-  HistoryEntry,
-} from '../api';
-import { formatRfc3339 } from '../dates';
+import { ActivitySummary, errorMessage, getActivities, getHistory, HistoryEntry } from '../api';
+import { CONNECT_HREF } from '../constants';
+import { RelativeTimeCell } from '../components/ui/RelativeTimeCell';
+import { TemplateCell } from '../components/ui/TemplateCell';
 import { testIds } from '../components/testIds';
-
-function formatTs(ts: number): string {
-  if (!ts) {
-    return '—';
-  }
-  // History timestamps are unix; accept either seconds or milliseconds.
-  const ms = ts < 1e12 ? ts * 1000 : ts;
-  return dateTimeFormat(ms);
-}
 
 function Activities() {
   const s = useStyles2(getStyles);
@@ -38,7 +27,7 @@ function Activities() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | undefined>(undefined);
 
-  // Used by the Refresh button (event-handler context — safe to flip `loading`).
+  // Used by the Refresh button (event-handler context - safe to flip `loading`).
   const load = useCallback(async () => {
     setLoading(true);
     setError(undefined);
@@ -47,7 +36,7 @@ function Activities() {
       setActivities(act.activities ?? []);
       setHistory(hist.entries ?? []);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -68,7 +57,7 @@ function Activities() {
       })
       .catch((e) => {
         if (active) {
-          setError(e instanceof Error ? e.message : String(e));
+          setError(errorMessage(e));
         }
       })
       .finally(() => {
@@ -100,7 +89,7 @@ function Activities() {
         id: 'template',
         header: 'Template',
         // The server nests the template under content, not at the top level.
-        cell: ({ row: { original } }) => <span>{original.content?.template ?? '-'}</span>,
+        cell: ({ row: { original } }) => <TemplateCell template={original.content?.template} />,
       },
       {
         id: 'priority',
@@ -110,7 +99,7 @@ function Activities() {
       {
         id: 'updated_at',
         header: 'Updated',
-        cell: ({ row: { original } }) => <span>{formatRfc3339(original.updated_at)}</span>,
+        cell: ({ row: { original } }) => <RelativeTimeCell value={original.updated_at} />,
       },
     ],
     []
@@ -121,7 +110,7 @@ function Activities() {
       {
         id: 'ts',
         header: 'Time',
-        cell: ({ row: { original } }) => <span>{formatTs(original.ts)}</span>,
+        cell: ({ row: { original } }) => <RelativeTimeCell value={original.ts} />,
       },
       { id: 'alertname', header: 'Alert' },
       { id: 'action', header: 'Action' },
@@ -142,14 +131,15 @@ function Activities() {
   );
 
   return (
-    <PluginPage>
+    <PluginPage
+      subTitle="Live Activities and recent deliveries, proxied live from api.pushward.app."
+      actions={
+        <Button variant="secondary" icon="sync" onClick={load} disabled={loading}>
+          Refresh
+        </Button>
+      }
+    >
       <div data-testid={testIds.activities.container}>
-        <Stack direction="row" justifyContent="flex-end">
-          <Button variant="secondary" icon="sync" onClick={load} disabled={loading}>
-            Refresh
-          </Button>
-        </Stack>
-
         {error && (
           <Alert severity="error" title="Could not load activities">
             {error}
@@ -161,10 +151,20 @@ function Activities() {
         ) : (
           <>
             <section className={s.section}>
-              <h3 className={s.h3}>Live Activities</h3>
-              <p className={s.muted}>Currently running Live Activities, proxied live from api.pushward.app.</p>
+              <Text element="h2" variant="h4">
+                Live Activities
+              </Text>
+              <p className={s.muted}>Currently running Live Activities streamed from your devices.</p>
               {activities.length === 0 ? (
-                <EmptyState variant="not-found" message="No Live Activities are currently running." />
+                <EmptyState
+                  variant="call-to-action"
+                  message="No Live Activities are currently running."
+                  button={
+                    <LinkButton icon="link" href={CONNECT_HREF}>
+                      Connect to Grafana Alerting
+                    </LinkButton>
+                  }
+                />
               ) : (
                 <InteractiveTable
                   columns={activityColumns}
@@ -176,7 +176,9 @@ function Activities() {
             </section>
 
             <section className={s.section}>
-              <h3 className={s.h3}>Recent delivery log</h3>
+              <Text element="h2" variant="h4">
+                Recent delivery log
+              </Text>
               <p className={s.muted}>The most recent webhook deliveries handled by the embedded bridge.</p>
               {history.length === 0 ? (
                 <EmptyState variant="not-found" message="No deliveries recorded yet." />
@@ -202,11 +204,8 @@ const getStyles = (theme: GrafanaTheme2) => ({
   section: css`
     margin-top: ${theme.spacing(3)};
   `,
-  h3: css`
-    margin-bottom: ${theme.spacing(1)};
-  `,
   muted: css`
     color: ${theme.colors.text.secondary};
-    margin-bottom: ${theme.spacing(1)};
+    margin: ${theme.spacing(1, 0)};
   `,
 });

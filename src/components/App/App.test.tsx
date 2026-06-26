@@ -59,7 +59,8 @@ describe('Components/App', () => {
       </MemoryRouter>
     );
 
-    // Pages are lazy-loaded, so wait for the Overview container to appear.
-    await waitFor(() => expect(queryByTestId(testIds.overview.container)).toBeInTheDocument(), { timeout: 2000 });
+    // Pages are lazy-loaded; allow headroom for jest's on-demand transform of the
+    // Overview module graph (in a real build webpack bundles this ahead of time).
+    await waitFor(() => expect(queryByTestId(testIds.overview.container)).toBeInTheDocument(), { timeout: 8000 });
   });
 });

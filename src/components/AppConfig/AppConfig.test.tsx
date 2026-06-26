@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { PluginType } from '@grafana/data';
 import AppConfig, { AppConfigProps } from './AppConfig';
 import { testIds } from 'components/testIds';
@@ -53,8 +53,14 @@ describe('Components/AppConfig', () => {
     expect(screen.queryByTestId(testIds.appConfig.apiKey)).toBeInTheDocument();
     expect(screen.queryByTestId(testIds.appConfig.apiUrl)).toBeInTheDocument();
     expect(screen.queryByTestId(testIds.appConfig.datasource)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /save settings/i })).toBeInTheDocument();
+
+    // Scale and smoothing live under the collapsed "Advanced timeline options"
+    // section: absent until the section is expanded, present after.
+    expect(screen.queryByTestId(testIds.appConfig.scale)).not.toBeInTheDocument();
+    expect(screen.queryByTestId(testIds.appConfig.smoothing)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText(/advanced timeline options/i));
     expect(screen.queryByTestId(testIds.appConfig.scale)).toBeInTheDocument();
     expect(screen.queryByTestId(testIds.appConfig.smoothing)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /save settings/i })).toBeInTheDocument();
   });
 });

@@ -7,13 +7,16 @@ import {
   Button,
   EmptyState,
   InteractiveTable,
+  LinkButton,
   LoadingPlaceholder,
-  Stack,
+  Text,
   useStyles2,
   type Column,
 } from '@grafana/ui';
-import { getWidgets, WidgetSummary } from '../api';
-import { formatRfc3339 } from '../dates';
+import { errorMessage, getWidgets, WidgetSummary } from '../api';
+import { CONFIG_HREF } from '../constants';
+import { RelativeTimeCell } from '../components/ui/RelativeTimeCell';
+import { TemplateCell } from '../components/ui/TemplateCell';
 import { testIds } from '../components/testIds';
 
 function formatValue(value: unknown): string {
@@ -40,7 +43,7 @@ function Widgets() {
       const res = await getWidgets();
       setWidgets(res.widgets ?? []);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -60,7 +63,7 @@ function Widgets() {
       })
       .catch((e) => {
         if (active) {
-          setError(e instanceof Error ? e.message : String(e));
+          setError(errorMessage(e));
         }
       })
       .finally(() => {
@@ -84,7 +87,7 @@ function Widgets() {
       {
         id: 'template',
         header: 'Template',
-        cell: ({ row: { original } }) => <span>{original.content?.template ?? '-'}</span>,
+        cell: ({ row: { original } }) => <TemplateCell template={original.content?.template} />,
       },
       {
         id: 'value',
@@ -99,21 +102,22 @@ function Widgets() {
       {
         id: 'updated_at',
         header: 'Updated',
-        cell: ({ row: { original } }) => <span>{formatRfc3339(original.updated_at)}</span>,
+        cell: ({ row: { original } }) => <RelativeTimeCell value={original.updated_at} />,
       },
     ],
     []
   );
 
   return (
-    <PluginPage>
+    <PluginPage
+      subTitle="Widgets published to PushWard as standalone Live Activities, proxied live from api.pushward.app."
+      actions={
+        <Button variant="secondary" icon="sync" onClick={load} disabled={loading}>
+          Refresh
+        </Button>
+      }
+    >
       <div data-testid={testIds.widgets.container}>
-        <Stack direction="row" justifyContent="flex-end">
-          <Button variant="secondary" icon="sync" onClick={load} disabled={loading}>
-            Refresh
-          </Button>
-        </Stack>
-
         {error && (
           <Alert severity="error" title="Could not load widgets">
             {error}
@@ -124,15 +128,19 @@ function Widgets() {
           <LoadingPlaceholder text="Loading widgets..." />
         ) : (
           <section className={s.section}>
-            <h3 className={s.h3}>Published widgets</h3>
-            <p className={s.muted}>
-              Widgets configured here are published to PushWard as standalone Live Activities, proxied live from
-              api.pushward.app.
-            </p>
+            <Text element="h2" variant="h4">
+              Published widgets
+            </Text>
+            <p className={s.muted}>Each widget is a scheduled PromQL query rendered as its own Live Activity.</p>
             {widgets.length === 0 ? (
               <EmptyState
-                variant="not-found"
-                message="No widgets are published. Configure them on the plugin's Configuration page."
+                variant="call-to-action"
+                message="No widgets are published yet."
+                button={
+                  <LinkButton icon="cog" href={CONFIG_HREF}>
+                    Configure widgets
+                  </LinkButton>
+                }
               />
             ) : (
               <InteractiveTable
@@ -155,11 +163,8 @@ const getStyles = (theme: GrafanaTheme2) => ({
   section: css`
     margin-top: ${theme.spacing(3)};
   `,
-  h3: css`
-    margin-bottom: ${theme.spacing(1)};
-  `,
   muted: css`
     color: ${theme.colors.text.secondary};
-    margin-bottom: ${theme.spacing(1)};
+    margin: ${theme.spacing(1, 0)};
   `,
 });

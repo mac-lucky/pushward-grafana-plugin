@@ -15,3 +15,9 @@ export enum ROUTES {
   Activities = 'activities',
   Widgets = 'widgets',
 }
+
+// Hrefs for cross-page navigation. CONFIG_HREF is Grafana's app-config page
+// (/plugins/<id>), the others are this app's own routes under PLUGIN_BASE_URL.
+export const CONFIG_HREF = `/plugins/${PLUGIN_ID}`;
+export const CONNECT_HREF = `${PLUGIN_BASE_URL}/${ROUTES.Connect}`;
+export const ACTIVITIES_HREF = `${PLUGIN_BASE_URL}/${ROUTES.Activities}`;

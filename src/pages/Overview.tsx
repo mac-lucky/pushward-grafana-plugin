@@ -2,44 +2,79 @@ import React, { useEffect, useState } from 'react';
 import { css } from '@emotion/css';
 import { GrafanaTheme2 } from '@grafana/data';
 import { PluginPage } from '@grafana/runtime';
-import { Alert, Badge, Icon, LinkButton, LoadingPlaceholder, Stack, useStyles2 } from '@grafana/ui';
-import { ApiKeyStatus, ConfigResponse, getConfig, getHealthz, HealthzResponse } from '../api';
-import { PLUGIN_BASE_URL, PLUGIN_ID, ROUTES } from '../constants';
+import { Alert, Card, Divider, Grid, Icon, LoadingPlaceholder, Text, useStyles2 } from '@grafana/ui';
+import { ApiKeyStatus, ConfigResponse, errorMessage, getConfig, getHealthz, HealthzResponse } from '../api';
+import { ACTIVITIES_HREF, CONFIG_HREF, CONNECT_HREF } from '../constants';
 import { testIds } from '../components/testIds';
+import { PageHero } from '../components/ui/PageHero';
+import { StatusCard, StatusCardProps } from '../components/ui/StatusCard';
 
 type LoadState =
   | { status: 'loading' }
   | { status: 'error'; error: string }
   | { status: 'ready'; health: HealthzResponse; config: ConfigResponse };
 
-function statusBadge(ok: boolean, okText: string, badText: string) {
-  return <Badge color={ok ? 'green' : 'orange'} icon={ok ? 'check' : 'exclamation-triangle'} text={ok ? okText : badText} />;
-}
+const ok = (title: string, description: string): StatusCardProps => ({
+  tone: 'success',
+  icon: 'check-circle',
+  title,
+  description,
+});
 
-// The API-key badge needs more nuance than ok/bad: distinguish a rejected key
-// (red) from a transient 'unknown' probe blip (amber), and from no key at all.
-function apiKeyBadge(status: ApiKeyStatus, keySet: boolean) {
+const warn = (title: string, description: string, action?: StatusCardProps['action']): StatusCardProps => ({
+  tone: 'warning',
+  icon: 'exclamation-triangle',
+  title,
+  description,
+  action,
+});
+
+// The API-key card is tri-state: distinguish a rejected key (error) from a
+// transient 'unknown' probe blip (warning), and from no key at all.
+function apiKeyCard(status: ApiKeyStatus, keySet: boolean): StatusCardProps {
   if (!keySet) {
-    return <Badge color="orange" icon="exclamation-triangle" text="API key missing" />;
+    return warn('API key missing', 'Add your PushWard integration key to deliver.', { label: 'Add key', href: CONFIG_HREF });
   }
   switch (status) {
     case 'valid':
-      return <Badge color="green" icon="check" text="PushWard API key valid" />;
+      return ok('API key valid', 'Authorized for api.pushward.app.');
     case 'rejected':
-      return <Badge color="red" icon="times-circle" text="API key rejected" />;
+      return {
+        tone: 'error',
+        icon: 'times-circle',
+        title: 'API key rejected',
+        description: 'The key was refused by api.pushward.app.',
+        action: { label: 'Update key', href: CONFIG_HREF },
+      };
     default:
-      return <Badge color="orange" icon="question-circle" text="API key unverified" />;
+      return {
+        tone: 'warning',
+        icon: 'question-circle',
+        title: 'API key unverified',
+        description: 'Could not verify the key right now.',
+      };
   }
 }
 
-// Widgets are optional: green when actively publishing, neutral grey when idle
-// (none configured) rather than a warning state.
-function widgetsBadge(publishing: boolean) {
-  return publishing ? (
-    <Badge color="green" icon="check" text="Widgets publishing" />
-  ) : (
-    <Badge color="darkgrey" icon="minus-circle" text="Widgets idle" />
-  );
+function statusCards(health: HealthzResponse, config: ConfigResponse): StatusCardProps[] {
+  return [
+    health.ok
+      ? ok('Backend healthy', 'The plugin bridge is responding.')
+      : { tone: 'error', icon: 'exclamation-triangle', title: 'Backend degraded', description: 'The plugin backend is not healthy.' },
+    apiKeyCard(health.apiKeyStatus, config.apiKeySet),
+    health.datasource
+      ? ok('Datasource configured', 'History queries are enabled.')
+      : warn('No datasource', 'Pick a Prometheus datasource to build timelines.', { label: 'Choose datasource', href: CONFIG_HREF }),
+    health.history
+      ? ok('Timeline history ready', 'Sparkline history can be queried.')
+      : warn('Timeline history unavailable', 'Needs a datasource and a Grafana token.'),
+    config.webhookConnected
+      ? ok('Alerting connected', 'The PushWard contact point is provisioned.')
+      : warn('Not connected', 'Run the Connect wizard to wire up alerting.', { label: 'Open Connect', href: CONNECT_HREF }),
+    health.widgets
+      ? ok('Widgets publishing', 'Configured widgets are streaming to PushWard.')
+      : { tone: 'neutral', icon: 'minus-circle', title: 'Widgets idle', description: 'No widgets configured (optional).' },
+  ];
 }
 
 function Overview() {
@@ -56,7 +91,7 @@ function Overview() {
       })
       .catch((e) => {
         if (active) {
-          setState({ status: 'error', error: e instanceof Error ? e.message : String(e) });
+          setState({ status: 'error', error: errorMessage(e) });
         }
       });
     return () => {
@@ -67,17 +102,23 @@ function Overview() {
   return (
     <PluginPage>
       <div data-testid={testIds.overview.container} className={s.page}>
-        <p className={s.lead}>
-          PushWard turns Grafana alerts into rich <strong>iOS Live Activities</strong> — a live, history-backed timeline on
-          the Lock Screen and Dynamic Island, delivered over APNs.
-        </p>
+        <PageHero
+          title="PushWard"
+          tagline={
+            <>
+              Grafana alerts <Icon name="arrow-right" /> rich iOS Live Activities, delivered over APNs.
+            </>
+          }
+        />
 
         <section className={s.section}>
-          <h3 className={s.h3}>How it works</h3>
+          <Text element="h2" variant="h4">
+            How it works
+          </Text>
           <p className={s.muted}>
             This plugin is the in-Grafana setup and management layer. Alerts still flow out of Grafana through a regular{' '}
-            <strong>webhook contact point</strong> that the Connect wizard creates for you — the webhook loops back into
-            this plugin&apos;s backend, which resolves the rule&apos;s PromQL, queries history through your Grafana
+            <strong>webhook contact point</strong> that the Connect wizard creates for you &mdash; the webhook loops back
+            into this plugin&apos;s backend, which resolves the rule&apos;s PromQL, queries history through your Grafana
             datasource, builds the timeline, and pushes it to PushWard.
           </p>
           <Alert severity="info" title="It is not a native contact-point type">
@@ -88,56 +129,73 @@ function Overview() {
         </section>
 
         <section className={s.section}>
-          <h3 className={s.h3}>Status</h3>
-          {state.status === 'loading' && <LoadingPlaceholder text="Checking status…" />}
-          {state.status === 'error' && (
-            <Alert severity="error" title="Could not reach the plugin backend">
-              {state.error}
-            </Alert>
-          )}
-          {state.status === 'ready' && (
-            <Stack direction="column" gap={1}>
-              <div data-testid={testIds.overview.status}>
-                <Stack direction="row" gap={1} wrap="wrap">
-                  {statusBadge(state.health.ok, 'Backend healthy', 'Backend degraded')}
-                  {apiKeyBadge(state.health.apiKeyStatus, state.config.apiKeySet)}
-                  {statusBadge(state.health.datasource, 'Datasource configured', 'No datasource')}
-                  {statusBadge(state.health.history, 'Timeline history ready', 'Timeline history unavailable')}
-                  {statusBadge(state.config.webhookConnected, 'Alerting connected', 'Not connected')}
-                  {widgetsBadge(state.health.widgets)}
-                </Stack>
-              </div>
-              {state.health.widgetsError && (
-                <Alert severity="warning" title="Widget configuration error">
-                  {state.health.widgetsError}
-                </Alert>
-              )}
-              {state.health.message && <p className={s.muted}>{state.health.message}</p>}
-            </Stack>
-          )}
+          <Text element="h2" variant="h4">
+            Status
+          </Text>
+          <div className={s.sectionBody}>
+            {state.status === 'loading' && <LoadingPlaceholder text="Checking status…" />}
+            {state.status === 'error' && (
+              <Alert severity="error" title="Could not reach the plugin backend">
+                {state.error}
+              </Alert>
+            )}
+            {state.status === 'ready' && (
+              <>
+                <div data-testid={testIds.overview.status}>
+                  <Grid minColumnWidth={34} gap={2}>
+                    {statusCards(state.health, state.config).map((card) => (
+                      <StatusCard key={card.title} {...card} />
+                    ))}
+                  </Grid>
+                </div>
+                {state.health.widgetsError && (
+                  <Alert severity="warning" title="Widget configuration error">
+                    {state.health.widgetsError}
+                  </Alert>
+                )}
+                {state.health.message && <p className={s.muted}>{state.health.message}</p>}
+              </>
+            )}
+          </div>
         </section>
 
         <section className={s.section}>
-          <h3 className={s.h3}>Get started</h3>
-          <Stack direction="row" gap={1} wrap="wrap">
-            <LinkButton icon="cog" variant="secondary" href={`/plugins/${PLUGIN_ID}`}>
-              Configure API key &amp; datasource
-            </LinkButton>
-            <LinkButton icon="link" href={`${PLUGIN_BASE_URL}/${ROUTES.Connect}`}>
-              Connect to Grafana Alerting
-            </LinkButton>
-            <LinkButton icon="list-ul" variant="secondary" href={`${PLUGIN_BASE_URL}/${ROUTES.Activities}`}>
-              View Live Activities
-            </LinkButton>
-          </Stack>
+          <Text element="h2" variant="h4">
+            Get started
+          </Text>
+          <div className={s.sectionBody}>
+            <Grid minColumnWidth={44} gap={2}>
+              <Card href={CONFIG_HREF}>
+                <Card.Figure>
+                  <Icon name="cog" size="xxl" />
+                </Card.Figure>
+                <Card.Heading>Configure</Card.Heading>
+                <Card.Description>Set your PushWard API key and the history datasource.</Card.Description>
+              </Card>
+              <Card href={CONNECT_HREF}>
+                <Card.Figure>
+                  <Icon name="link" size="xxl" />
+                </Card.Figure>
+                <Card.Heading>Connect to Alerting</Card.Heading>
+                <Card.Description>Provision the webhook contact point in one click.</Card.Description>
+              </Card>
+              <Card href={ACTIVITIES_HREF}>
+                <Card.Figure>
+                  <Icon name="list-ul" size="xxl" />
+                </Card.Figure>
+                <Card.Heading>View Live Activities</Card.Heading>
+                <Card.Description>See running activities and the recent delivery log.</Card.Description>
+              </Card>
+            </Grid>
+          </div>
         </section>
 
+        <Divider spacing={3} />
         <p className={s.footer}>
           <Icon name="external-link-alt" /> Learn more at{' '}
           <a className={s.link} href="https://pushward.app" target="_blank" rel="noreferrer">
             pushward.app
           </a>
-          .
         </p>
       </div>
     </PluginPage>
@@ -148,23 +206,19 @@ export default Overview;
 
 const getStyles = (theme: GrafanaTheme2) => ({
   page: css`
-    max-width: 820px;
-  `,
-  lead: css`
-    font-size: ${theme.typography.h5.fontSize};
-    margin-bottom: ${theme.spacing(2)};
+    max-width: 980px;
   `,
   section: css`
     margin-top: ${theme.spacing(3)};
   `,
-  h3: css`
-    margin-bottom: ${theme.spacing(1)};
+  sectionBody: css`
+    margin-top: ${theme.spacing(1.5)};
   `,
   muted: css`
     color: ${theme.colors.text.secondary};
+    margin-top: ${theme.spacing(1)};
   `,
   footer: css`
-    margin-top: ${theme.spacing(4)};
     color: ${theme.colors.text.secondary};
   `,
   link: css`
