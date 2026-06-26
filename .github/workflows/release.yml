@@ -19,11 +19,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: grafana/plugin-actions/build-plugin@build-plugin/v1.0.2
-        # Uncomment to enable plugin signing
-        # (For more info on how to generate the access policy token see https://grafana.com/developers/plugin-tools/publish-a-plugin/sign-a-plugin#generate-an-access-policy-token)
-        #with:
-        # Make sure to save the token in your repository secrets
-        #policy_token: $
-        # Usage of GRAFANA_API_KEY is deprecated, prefer `policy_token` option above
-        #grafana_token: $
+      - uses: grafana/plugin-actions/build-plugin@build-plugin/v1.2.0
+        with:
+          # build-plugin defaults to Node 20; match the CI build on 22.
+          node-version: '22'
+          # To sign for the catalog / Grafana Cloud, save the token in repository
+          # secrets and uncomment (see the grafana.com plugin-tools signing docs):
+          # policy_token: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
