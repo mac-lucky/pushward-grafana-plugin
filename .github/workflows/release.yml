@@ -21,8 +21,10 @@ jobs:
 
       - uses: grafana/plugin-actions/build-plugin@build-plugin/v1.2.0
         with:
-          # build-plugin defaults to Node 20; match the CI build on 22.
+          # build-plugin defaults to Node 20 and Go 1.25; match the CI build
+          # (Node 22) and the go.mod toolchain (1.26.4) so the backend builds.
           node-version: '22'
+          go-version: '1.26.4'
           # To sign for the catalog / Grafana Cloud, save the token in repository
           # secrets and uncomment (see the grafana.com plugin-tools signing docs):
           # policy_token: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
