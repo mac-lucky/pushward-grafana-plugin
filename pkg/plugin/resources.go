@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/mac-lucky/pushward-integrations/shared/pushward"
+
+	"github.com/mac-lucky/pushward-grafana-plugin/pkg/plugin/bridge"
 )
 
 // webhookResourcePath is the in-Grafana path the Connect wizard points the
@@ -34,6 +36,8 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/test", a.handleTest)
 	mux.HandleFunc("/webhook", a.handleWebhook)
 	mux.HandleFunc("/activities", a.handleActivities)
+	mux.HandleFunc("/activities/end", a.handleEndActivity)
+	mux.HandleFunc("/active", a.handleActive)
 	mux.HandleFunc("/widgets", a.handleWidgets)
 	mux.HandleFunc("/history", a.handleHistory)
 }
@@ -139,6 +143,58 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"webhookConnected": s.WebhookToken != "",
 		"webhookUrl":       webhookResourcePath,
 	})
+}
+
+// endActivityRequest is the body for POST /activities/end.
+type endActivityRequest struct {
+	Slug string `json:"slug"`
+}
+
+// handleEndActivity ends a running Live Activity on the user's behalf. It first
+// tells the bridge to forget the slug (so the poller / alertmanager backstop
+// won't resurrect an alert-driven activity), then sends a terminal ENDED state
+// to PushWard. Ending via state=ended uses the hlk_ key's activity:update scope
+// already required by the bridge - no extra scope needed.
+func (a *App) handleEndActivity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "message": "method not allowed"})
+		return
+	}
+	if a.settings.APIKey == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "PushWard API key not set"})
+		return
+	}
+	var body endActivityRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil || strings.TrimSpace(body.Slug) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "slug required"})
+		return
+	}
+
+	if a.bridge != nil {
+		a.bridge.Forget(body.Slug)
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	if err := a.pw.PatchActivity(ctx, body.Slug, pushward.PatchRequest{State: pushward.StateEnded}); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleActive returns the bridge's currently tracked alerts so the Activities
+// page can map an activity slug to the alert identity (rule UID / alertname) it
+// needs to build silence matchers.
+func (a *App) handleActive(w http.ResponseWriter, r *http.Request) {
+	if !requireGet(w, r) {
+		return
+	}
+	var active []bridge.ActiveAlert
+	if a.bridge != nil {
+		active = a.bridge.ActiveAlerts()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"active": active})
 }
 
 type testRequest struct {

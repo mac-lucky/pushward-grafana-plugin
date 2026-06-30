@@ -31,9 +31,16 @@ type Poller struct {
 	interval      time.Duration
 
 	mu       sync.Mutex
-	active   map[string]context.CancelFunc
+	active   map[string]*pollHandle
 	callback UpdateCallback
 	wg       sync.WaitGroup
+}
+
+// pollHandle tracks one per-slug poll goroutine: cancel stops it, done is closed
+// when run() exits so StopAndWait can drain it deterministically.
+type pollHandle struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // NewPoller creates a new Poller. q is the metrics querier (the datasource-proxy
@@ -44,7 +51,7 @@ func NewPoller(q MetricsQuerier, pw *pushward.Client, interval time.Duration) *P
 		metricsClient: q,
 		pwClient:      pw,
 		interval:      interval,
-		active:        make(map[string]context.CancelFunc),
+		active:        make(map[string]*pollHandle),
 	}
 }
 
@@ -70,22 +77,46 @@ func (p *Poller) StartWithSeed(slug, expr, seriesLabel string, seed *pushward.Co
 	}
 
 	ctx, cancel := context.WithCancel(context.Background()) // #nosec G118 -- cancel is stored in p.active and called in Stop/StopAll
-	p.active[slug] = cancel
+	done := make(chan struct{})
+	p.active[slug] = &pollHandle{cancel: cancel, done: done}
 	p.wg.Add(1)
-	go p.run(ctx, slug, expr, seriesLabel, seed)
+	go p.run(ctx, slug, expr, seriesLabel, seed, done)
 }
 
-// Stop cancels the polling goroutine for the given slug.
+// Stop cancels the polling goroutine for the given slug (asynchronous; does not
+// wait for it to exit). Used by the hot resolve/sweep/checker paths.
 func (p *Poller) Stop(slug string) {
 	p.mu.Lock()
-	cancel, ok := p.active[slug]
+	h, ok := p.active[slug]
 	if ok {
 		delete(p.active, slug)
 	}
 	p.mu.Unlock()
 
 	if ok {
-		cancel()
+		h.cancel()
+	}
+}
+
+// StopAndWait cancels the polling goroutine for slug and blocks until it has
+// exited, so a caller that then writes a terminal state can't be overtaken by an
+// in-flight steady-state patch. A timeout bounds the wait so a goroutine stuck
+// in a slow network call can't hang the caller. No-op if not polling that slug.
+func (p *Poller) StopAndWait(slug string) {
+	p.mu.Lock()
+	h, ok := p.active[slug]
+	if ok {
+		delete(p.active, slug)
+	}
+	p.mu.Unlock()
+
+	if !ok {
+		return
+	}
+	h.cancel()
+	select {
+	case <-h.done:
+	case <-time.After(10 * time.Second):
 	}
 }
 
@@ -97,8 +128,8 @@ func (p *Poller) Wait() {
 // StopAll cancels all active polling goroutines.
 func (p *Poller) StopAll() {
 	p.mu.Lock()
-	for slug, cancel := range p.active {
-		cancel()
+	for slug, h := range p.active {
+		h.cancel()
 		delete(p.active, slug)
 	}
 	p.mu.Unlock()
@@ -120,8 +151,9 @@ func (p *Poller) SetUpdateCallback(cb UpdateCallback) {
 	p.mu.Unlock()
 }
 
-func (p *Poller) run(ctx context.Context, slug, expr, seriesLabel string, seed *pushward.Content) {
+func (p *Poller) run(ctx context.Context, slug, expr, seriesLabel string, seed *pushward.Content, done chan struct{}) {
 	defer p.wg.Done()
+	defer close(done) // signal StopAndWait that this goroutine has fully exited
 
 	logger := slog.With("slug", slug)
 	ticker := time.NewTicker(p.interval)

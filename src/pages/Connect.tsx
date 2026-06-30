@@ -1,10 +1,19 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { css } from '@emotion/css';
 import { AppPluginMeta, GrafanaTheme2 } from '@grafana/data';
 import { PluginPage } from '@grafana/runtime';
 import { Alert, Button, ClipboardButton, Field, Input, LoadingPlaceholder, Stack, Text, TextLink, useStyles2 } from '@grafana/ui';
-import { ConfigResponse, connectToAlerting, errorMessage, getConfig, sendTest, TestKind, webhookUrl } from '../api';
-import { CONFIG_HREF } from '../constants';
+import {
+  addPushwardQueryAnnotation,
+  ConfigResponse,
+  connectToAlerting,
+  errorMessage,
+  getConfig,
+  sendTest,
+  TestKind,
+  webhookUrl,
+} from '../api';
+import { CONFIG_HREF, PARAM_EXPR, PARAM_RULE_UID } from '../constants';
 import { testIds } from '../components/testIds';
 import { StatusCard } from '../components/ui/StatusCard';
 import { BRAND_ACCENT } from '../components/ui/brand';
@@ -30,6 +39,16 @@ function Step({ n, title, children }: { n: number; title: string; children: Reac
   );
 }
 
+// alertSetup reads the rule context the "Set up PushWard for this alert" UI
+// extension link passes through (PromQL expr + rule UID), so the page can offer
+// to wire the pushward_query annotation for that specific rule.
+function useAlertSetup() {
+  return useMemo(() => {
+    const q = new URLSearchParams(window.location.search);
+    return { expr: q.get(PARAM_EXPR) ?? '', ruleUid: q.get(PARAM_RULE_UID) ?? '' };
+  }, []);
+}
+
 function Connect({ meta }: ConnectProps) {
   const s = useStyles2(getStyles);
   const [config, setConfig] = useState<ConfigResponse | undefined>(undefined);
@@ -37,6 +56,9 @@ function Connect({ meta }: ConnectProps) {
   const [connecting, setConnecting] = useState(false);
   const [testing, setTesting] = useState<TestKind | undefined>(undefined);
   const [banner, setBanner] = useState<Banner | undefined>(undefined);
+  const alertSetup = useAlertSetup();
+  const [annotating, setAnnotating] = useState(false);
+  const [annotated, setAnnotated] = useState(false);
 
   // Re-fetch status after the Connect action. setState lives in event-handler
   // context here, so it's safe to flip `loading` synchronously.
@@ -91,6 +113,27 @@ function Connect({ meta }: ConnectProps) {
       setBanner({ severity: 'error', title: 'Failed to connect', detail: errorMessage(e) });
     } finally {
       setConnecting(false);
+    }
+  };
+
+  const onAnnotate = async () => {
+    if (!alertSetup.ruleUid || !alertSetup.expr) {
+      return;
+    }
+    setAnnotating(true);
+    setBanner(undefined);
+    try {
+      await addPushwardQueryAnnotation(alertSetup.ruleUid, alertSetup.expr);
+      setAnnotated(true);
+      setBanner({
+        severity: 'success',
+        title: 'Annotation added',
+        detail: 'This rule now carries the pushward_query annotation. Route it to the PushWard contact point to start streaming a timeline.',
+      });
+    } catch (e) {
+      setBanner({ severity: 'error', title: 'Could not add annotation', detail: errorMessage(e) });
+    } finally {
+      setAnnotating(false);
     }
   };
 
@@ -151,6 +194,33 @@ function Connect({ meta }: ConnectProps) {
                 </TextLink>{' '}
                 before sending tests &mdash; delivery to api.pushward.app will fail without it.
               </Alert>
+            )}
+
+            {alertSetup.expr && (
+              <Step n={0} title="Wire this alert to a timeline">
+                <p className={s.muted}>
+                  Add the <code>pushward_query</code> annotation so this alert builds a history-backed timeline Live
+                  Activity. Either let PushWard add it for you, or copy it onto the rule manually.
+                </p>
+                <Field
+                  label="pushward_query"
+                  description="The alert rule's PromQL. PushWard queries it through the datasource proxy to build the sparkline."
+                >
+                  <Stack direction="row" gap={1} alignItems="center">
+                    <Input readOnly value={alertSetup.expr} width={70} />
+                    <ClipboardButton variant="secondary" icon="copy" getText={() => alertSetup.expr}>
+                      Copy
+                    </ClipboardButton>
+                  </Stack>
+                </Field>
+                {alertSetup.ruleUid && (
+                  <div className={s.actions}>
+                    <Button icon="pen" onClick={onAnnotate} disabled={annotating || annotated}>
+                      {annotated ? 'Annotation added' : annotating ? 'Adding…' : 'Add annotation to this rule'}
+                    </Button>
+                  </div>
+                )}
+              </Step>
             )}
 
             <Step n={1} title="Connect to Grafana Alerting">

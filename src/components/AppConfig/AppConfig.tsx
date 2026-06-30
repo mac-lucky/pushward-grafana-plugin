@@ -16,6 +16,7 @@ import {
   Field,
   FieldSet,
   Input,
+  RadioButtonGroup,
   SecretInput,
   Switch,
   Text,
@@ -26,6 +27,7 @@ import {
 import { getConfig } from '../../api';
 import { CONNECT_HREF } from '../../constants';
 import { testIds } from '../testIds';
+import { WidgetBuilder } from './WidgetBuilder';
 
 // One widget definition. Mirrors the standalone bridge's widget config; kept loose
 // here because the backend owns validation - the form only round-trips the JSON.
@@ -109,11 +111,18 @@ const WIDGET_EXAMPLE = JSON.stringify(
   2
 );
 
+type WidgetsMode = 'form' | 'json';
+
 type State = AppPluginSettings & {
   // New API key value being entered (write-only; never read back from Grafana).
   apiKey: string;
   isApiKeySet: boolean;
   isWebhookTokenSet: boolean;
+  // Widget definitions. The form builder edits `widgets` directly; the JSON
+  // editor edits `widgetsText`. widgetsMode selects which is the source of truth
+  // on submit; switching modes serialises/parses between the two.
+  widgets: WidgetConfig[];
+  widgetsMode: WidgetsMode;
   // Raw text of the widgets JSON editor, plus the last client-side parse error.
   widgetsText: string;
   widgetsError?: string;
@@ -145,6 +154,8 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     apiKey: '',
     isApiKeySet: Boolean(secureJsonFields?.apiKey),
     isWebhookTokenSet: Boolean(secureJsonFields?.webhookToken),
+    widgets: jsonData?.widgets ?? [],
+    widgetsMode: 'form',
     widgetsText: jsonData?.widgets?.length ? JSON.stringify(jsonData.widgets, null, 2) : '',
     widgetsError: undefined,
   });
@@ -186,8 +197,50 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     setState({ ...state, widgetsText: event.target.value, widgetsError: undefined, backendWidgetsError: undefined });
   };
 
-  const onLoadWidgetExample = () =>
-    setState({ ...state, widgetsText: WIDGET_EXAMPLE, widgetsError: undefined, backendWidgetsError: undefined });
+  const onWidgetsChange = (widgets: WidgetConfig[]) =>
+    setState((prev) => ({ ...prev, widgets, widgetsError: undefined, backendWidgetsError: undefined }));
+
+  // parseWidgetsText turns the JSON editor's text into a widgets array, throwing
+  // on anything that isn't a JSON array so callers can surface an inline error.
+  const parseWidgetsText = (text: string): WidgetConfig[] => {
+    const raw = text.trim();
+    if (raw === '') {
+      return [];
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      throw new Error('Widgets must be a JSON array.');
+    }
+    return parsed as WidgetConfig[];
+  };
+
+  const onSetWidgetsMode = (mode: WidgetsMode) => {
+    if (mode === state.widgetsMode) {
+      return;
+    }
+    if (mode === 'json') {
+      // form -> json: serialise the current builder state into the editor.
+      setState({
+        ...state,
+        widgetsMode: 'json',
+        widgetsText: state.widgets.length ? JSON.stringify(state.widgets, null, 2) : '',
+        widgetsError: undefined,
+      });
+      return;
+    }
+    // json -> form: parse, blocking the switch on invalid JSON.
+    try {
+      const widgets = parseWidgetsText(state.widgetsText);
+      setState({ ...state, widgetsMode: 'form', widgets, widgetsError: undefined, backendWidgetsError: undefined });
+    } catch (e) {
+      setState({ ...state, widgetsError: e instanceof Error ? e.message : 'Invalid JSON.' });
+    }
+  };
+
+  const onLoadWidgetExample = () => {
+    const widgets = JSON.parse(WIDGET_EXAMPLE) as WidgetConfig[];
+    setState({ ...state, widgets, widgetsText: WIDGET_EXAMPLE, widgetsError: undefined, backendWidgetsError: undefined });
+  };
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -195,24 +248,20 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
       return;
     }
 
-    // Parse the widgets editor: empty -> [], a JSON array -> save it, anything
-    // else -> block the submit and surface an inline error rather than persist
-    // malformed config.
-    let widgets: WidgetConfig[] = [];
-    const raw = state.widgetsText.trim();
-    if (raw !== '') {
-      let parsed: unknown;
+    // In JSON mode parse the editor (blocking the save on malformed JSON); in
+    // form mode the builder array is already the source of truth. Semantic
+    // validation (slugs, intervals, required fields) stays with the backend,
+    // which surfaces backendWidgetsError on the next load.
+    let widgets: WidgetConfig[];
+    if (state.widgetsMode === 'json') {
       try {
-        parsed = JSON.parse(raw);
+        widgets = parseWidgetsText(state.widgetsText);
       } catch (e) {
         setState({ ...state, widgetsError: e instanceof Error ? e.message : 'Invalid JSON.' });
         return;
       }
-      if (!Array.isArray(parsed)) {
-        setState({ ...state, widgetsError: 'Widgets must be a JSON array.' });
-        return;
-      }
-      widgets = parsed as WidgetConfig[];
+    } else {
+      widgets = state.widgets;
     }
 
     updatePluginAndReload(plugin.meta.id, {
@@ -427,36 +476,50 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
 
       <FieldSet label="Widgets">
         <Field
-          label="Widget definitions (JSON)"
+          label="Editor"
           description={
-            'A JSON array of widgets published to PushWard as standalone Live Activities. Each entry: ' +
-            '{ slug, name?, template, query?/query_all?, stat_rows?, interval?, update_mode?, min_change?, content? }. ' +
-            'Leave empty to publish none. Publishing requires the integration key to have the "widgets" scope and a datasource selected above.'
+            'Widgets published to PushWard as PromQL-backed iOS widgets. Publishing requires the integration key to ' +
+            'have the "widgets" scope and a datasource selected above.'
           }
           invalid={Boolean(state.widgetsError || state.backendWidgetsError)}
           error={state.widgetsError ?? state.backendWidgetsError}
         >
-          <TextArea
-            id="config-widgets"
-            data-testid={testIds.appConfig.widgets}
-            className={s.code}
-            rows={12}
-            value={state.widgetsText}
-            placeholder='[ { "slug": "my-widget", "name": "My widget", "template": "stat_list", "stat_rows": [] } ]'
-            onChange={onChangeWidgets}
+          <RadioButtonGroup<WidgetsMode>
+            options={[
+              { label: 'Form', value: 'form' },
+              { label: 'JSON', value: 'json' },
+            ]}
+            value={state.widgetsMode}
+            onChange={onSetWidgetsMode}
           />
         </Field>
-        <div className={s.marginTop}>
-          <Button
-            type="button"
-            variant="secondary"
-            icon="file-alt"
-            data-testid={testIds.appConfig.widgetsExample}
-            onClick={onLoadWidgetExample}
-          >
-            Load example
-          </Button>
-        </div>
+
+        {state.widgetsMode === 'form' ? (
+          <WidgetBuilder widgets={state.widgets} onChange={onWidgetsChange} />
+        ) : (
+          <>
+            <TextArea
+              id="config-widgets"
+              data-testid={testIds.appConfig.widgets}
+              className={s.code}
+              rows={12}
+              value={state.widgetsText}
+              placeholder='[ { "slug": "my-widget", "name": "My widget", "template": "stat_list", "stat_rows": [] } ]'
+              onChange={onChangeWidgets}
+            />
+            <div className={s.marginTop}>
+              <Button
+                type="button"
+                variant="secondary"
+                icon="file-alt"
+                data-testid={testIds.appConfig.widgetsExample}
+                onClick={onLoadWidgetExample}
+              >
+                Load example
+              </Button>
+            </div>
+          </>
+        )}
       </FieldSet>
 
       <div className={s.footer}>

@@ -105,7 +105,11 @@ type alertState struct {
 	// alertname is the real "alertname" label ("" for anonymous alerts whose
 	// map key is the fingerprint). The alert-state checker matches on this, not
 	// the map key, so it can't query a fingerprint as an alertname.
-	alertname    string
+	alertname string
+	// ruleUID is the Grafana alert-rule UID extracted from the alert's
+	// generatorURL (empty when it can't be parsed). It's the preferred silence
+	// matcher (__alert_rule_uid__) for the management UI's "Silence" action.
+	ruleUID      string
 	expr         string
 	refID        string
 	seriesLabel  string
@@ -287,7 +291,8 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 			return
 		}
 		b.active[mapKey] = &alertState{
-			slug: slug, alertname: a.Labels["alertname"], seriesLabel: seriesLabel, lastSeen: time.Now(),
+			slug: slug, alertname: a.Labels["alertname"], ruleUID: b.ruleUIDFor(a),
+			seriesLabel: seriesLabel, lastSeen: time.Now(),
 			fingerprints: map[string]struct{}{a.Fingerprint: {}},
 		}
 	} else {
@@ -621,6 +626,67 @@ func (b *Bridge) buildContent(a alert, severity string, values map[string]float6
 	}
 
 	return content
+}
+
+// ruleUIDFor extracts the Grafana alert-rule UID from an alert's generatorURL,
+// returning "" when no resolver is configured or the URL doesn't match. Stored
+// on the alertState so the management UI can build a precise silence matcher
+// (__alert_rule_uid__) for the in-UI "Silence" action.
+func (b *Bridge) ruleUIDFor(a alert) string {
+	if b.grafanaClient == nil {
+		return ""
+	}
+	return b.grafanaClient.ExtractRuleUID(a.GeneratorURL)
+}
+
+// ActiveAlert is a read-only snapshot of one tracked alert, exposed to the
+// management UI so a row can build silence matchers (ruleUID preferred,
+// alertname as fallback).
+type ActiveAlert struct {
+	Slug      string `json:"slug"`
+	AlertName string `json:"alertname"`
+	RuleUID   string `json:"ruleUid"`
+}
+
+// ActiveAlerts returns a snapshot of the currently tracked alerts. Used by the
+// /active resource route so the Activities page can map an activity slug back to
+// the alert identity needed to silence it.
+func (b *Bridge) ActiveAlerts() []ActiveAlert {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]ActiveAlert, 0, len(b.active))
+	for _, st := range b.active {
+		out = append(out, ActiveAlert{Slug: st.slug, AlertName: st.alertname, RuleUID: st.ruleUID})
+	}
+	return out
+}
+
+// Forget drops the alert tracked under slug (if any) and stops its poller, so a
+// user-initiated "End" from the management UI isn't resurrected by the next
+// poll or alertmanager backstop. It waits for the poller goroutine to exit
+// before returning (StopAndWait), so the caller's subsequent terminal ENDED
+// patch can't be overtaken by an in-flight steady-state ongoing patch. Returns
+// whether an entry was found.
+func (b *Bridge) Forget(slug string) bool {
+	b.mu.Lock()
+	var key string
+	for k, st := range b.active {
+		if st.slug == slug {
+			key = k
+			break
+		}
+	}
+	if key != "" {
+		delete(b.active, key)
+	}
+	b.mu.Unlock()
+	if b.poller != nil {
+		// Always StopAndWait (even when the entry was already gone): a poller may
+		// still be running for this slug, and draining it before the caller ends
+		// the activity is what closes the resurrection window.
+		b.poller.StopAndWait(slug)
+	}
+	return key != ""
 }
 
 func (b *Bridge) fetchHistoryAll(ctx context.Context, logger *slog.Logger, expr, seriesLabel string) map[string][]pushward.HistoryPoint {

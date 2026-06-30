@@ -72,6 +72,20 @@
       { "action": "alert.instances:read" }
     ]
   },
+  "extensions": {
+    "addedLinks": [
+      {
+        "targets": ["grafana/alerting/alertingrule/action", "grafana/alerting/instance/action"],
+        "title": "View in PushWard",
+        "description": "Open the matching Live Activities and delivery log in PushWard."
+      },
+      {
+        "targets": ["grafana/alerting/alertingrule/action"],
+        "title": "Set up PushWard for this alert",
+        "description": "Pre-fill the pushward_query annotation so this alert streams a timeline Live Activity."
+      }
+    ]
+  },
   "dependencies": {
     "grafanaDependency": ">=12.3.0",
     "plugins": []

@@ -123,6 +123,24 @@ export interface HistoryResponse {
   entries: HistoryEntry[];
 }
 
+// One alert the embedded bridge is currently tracking. Lets the Activities page
+// map an activity slug to the alert identity needed to build silence matchers
+// (ruleUid preferred, alertname as fallback).
+export interface ActiveAlert {
+  slug: string;
+  alertname: string;
+  ruleUid: string;
+}
+
+export interface ActiveResponse {
+  active: ActiveAlert[];
+}
+
+export interface ActionResponse {
+  ok: boolean;
+  message?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Backend resource calls (served by the plugin's own Go backend).
 // ---------------------------------------------------------------------------
@@ -148,6 +166,17 @@ export async function getWidgets(): Promise<WidgetsResponse> {
 
 export function getHistory(): Promise<HistoryResponse> {
   return getBackendSrv().get<HistoryResponse>(`${RESOURCE_BASE_URL}/history`);
+}
+
+export async function getActive(): Promise<ActiveResponse> {
+  const res = await getBackendSrv().get<ActiveResponse>(`${RESOURCE_BASE_URL}/active`);
+  return { active: res?.active ?? [] };
+}
+
+// endActivity ends a running Live Activity. The backend forgets the alert first
+// (so the bridge poller doesn't resurrect it), then sends a terminal ENDED state.
+export function endActivity(slug: string): Promise<ActionResponse> {
+  return getBackendSrv().post<ActionResponse>(`${RESOURCE_BASE_URL}/activities/end`, { slug });
 }
 
 export type TestKind = 'notification' | 'timeline';
@@ -339,4 +368,72 @@ export async function connectToAlerting(enabled: boolean, pinned: boolean): Prom
   // mid-flow never leaves the contact point pointing at a revoked secret.
   // Best-effort: never touch the token just minted, never let cleanup abort the flow.
   await revokeStaleWebhookTokens(saId, created.id);
+}
+
+// ---------------------------------------------------------------------------
+// Grafana Alerting calls - run against Grafana's own API with the logged-in
+// user's session (NOT the plugin backend). The user's RBAC governs them, so a
+// Viewer who lacks alert.instances:create gets a clean 403; an Editor/Admin can
+// silence and edit rules. No plugin feature toggle is involved.
+// ---------------------------------------------------------------------------
+
+// One label matcher in a Grafana alertmanager silence (v2 schema). For an exact
+// label match send isRegex=false, isEqual=true.
+export interface SilenceMatcher {
+  name: string;
+  value: string;
+  isRegex: boolean;
+  isEqual: boolean;
+}
+
+/**
+ * Creates a Grafana silence matching the given matchers for durationSec,
+ * starting now. Returns the new silence ID. Throws (surfaced via errorMessage)
+ * when the user lacks permission or the matchers are empty.
+ */
+export async function silenceAlert(opts: {
+  matchers: SilenceMatcher[];
+  durationSec: number;
+  comment?: string;
+}): Promise<string> {
+  const now = new Date();
+  const endsAt = new Date(now.getTime() + opts.durationSec * 1000);
+  const res = await lastValueFrom(
+    getBackendSrv().fetch<{ silenceID?: string }>({
+      url: '/api/alertmanager/grafana/api/v2/silences',
+      method: 'POST',
+      data: {
+        matchers: opts.matchers,
+        startsAt: now.toISOString(),
+        endsAt: endsAt.toISOString(),
+        createdBy: 'PushWard',
+        comment: opts.comment ?? 'Silenced from PushWard',
+      },
+      showErrorAlert: false,
+    })
+  );
+  return res.data?.silenceID ?? '';
+}
+
+/**
+ * Adds (or overwrites) the `pushward_query` annotation on a Grafana-managed
+ * alert rule so the embedded bridge can resolve its PromQL. The provisioning API
+ * has no PATCH, so GET the rule, merge the annotation, and PUT it back whole.
+ * X-Disable-Provenance keeps the rule editable in the UI afterwards.
+ */
+export async function addPushwardQueryAnnotation(uid: string, expr: string): Promise<void> {
+  const path = `/api/v1/provisioning/alert-rules/${encodeURIComponent(uid)}`;
+  const rule = await getBackendSrv().get<Record<string, unknown>>(path, undefined, undefined, {
+    showErrorAlert: false,
+  });
+  const annotations = { ...((rule.annotations as Record<string, string>) ?? {}), pushward_query: expr };
+  await lastValueFrom(
+    getBackendSrv().fetch({
+      url: path,
+      method: 'PUT',
+      data: { ...rule, annotations },
+      headers: { 'X-Disable-Provenance': 'true' },
+      showErrorAlert: false,
+    })
+  );
 }

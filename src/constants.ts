@@ -21,3 +21,11 @@ export enum ROUTES {
 export const CONFIG_HREF = `/plugins/${PLUGIN_ID}`;
 export const CONNECT_HREF = `${PLUGIN_BASE_URL}/${ROUTES.Connect}`;
 export const ACTIVITIES_HREF = `${PLUGIN_BASE_URL}/${ROUTES.Activities}`;
+export const WIDGETS_HREF = `${PLUGIN_BASE_URL}/${ROUTES.Widgets}`;
+
+// Query-param keys passed by the alert-rule UI extension links so the target
+// page can filter (Activities) or pre-fill the pushward_query annotation
+// (Connect) for the rule the user clicked from.
+export const PARAM_ALERTNAME = 'alertname';
+export const PARAM_RULE_UID = 'ruleUid';
+export const PARAM_EXPR = 'expr';
