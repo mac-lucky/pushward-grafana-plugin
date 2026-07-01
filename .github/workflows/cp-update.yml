@@ -18,3 +18,6 @@ jobs:
         with:
           # Make sure to save the token in your repository secrets as `GH_PAT_TOKEN`
           token: ${{ secrets.GH_PAT_TOKEN }}
+          # This repo's default branch is master; the action defaults base to main,
+          # which makes its checkout fetch a nonexistent ref and fail.
+          base: master
