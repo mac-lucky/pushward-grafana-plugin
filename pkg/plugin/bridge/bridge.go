@@ -625,6 +625,16 @@ func (b *Bridge) buildContent(a alert, severity string, values map[string]float6
 		content.State = a.Labels["alertname"]
 	}
 
+	// A multi-series timeline defaults its headline to the alphabetically first
+	// series; an alert annotation can name the series that should drive the
+	// headline number and the high/low range instead. Set it whenever present (a
+	// single-series timeline ignores it) so it also rides the poller-seeded path
+	// where the firing webhook carried no values. Skipped past the server's
+	// 32-rune cap so a stray value can't reject the whole update.
+	if v := a.Annotations["pushward_primary_series"]; v != "" && len([]rune(v)) <= 32 {
+		content.PrimarySeries = v
+	}
+
 	return content
 }
 
