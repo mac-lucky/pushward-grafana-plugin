@@ -106,13 +106,12 @@ function Overview() {
 
   useEffect(() => {
     let active = true;
-    // Stats resolve to undefined on failure so they can't fail the page; the
-    // core status still depends on healthz + config.
-    const stats = getStats().catch(() => undefined);
-    Promise.all([getHealthz(), getConfig()])
-      .then(async ([health, config]) => {
+    // Stats swallow their own failure to undefined, so a stats error can't fail
+    // the page; only healthz/config rejection reaches the error state.
+    Promise.all([getHealthz(), getConfig(), getStats().catch(() => undefined)])
+      .then(([health, config, stats]) => {
         if (active) {
-          setState({ status: 'ready', health, config, stats: await stats });
+          setState({ status: 'ready', health, config, stats });
         }
       })
       .catch((e) => {

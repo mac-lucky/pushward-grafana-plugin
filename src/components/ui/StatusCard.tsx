@@ -2,8 +2,9 @@ import React from 'react';
 import { css, cx } from '@emotion/css';
 import { GrafanaTheme2 } from '@grafana/data';
 import { Icon, type IconName, Text, useStyles2 } from '@grafana/ui';
+import { StatusTone, tileBase, toneColor } from './cardStyle';
 
-export type StatusTone = 'success' | 'warning' | 'error' | 'neutral';
+export type { StatusTone };
 
 export interface StatusCardProps {
   tone: StatusTone;
@@ -44,27 +45,28 @@ export function StatusCard({ tone, icon, title, description, action }: StatusCar
 }
 
 const getStyles = (theme: GrafanaTheme2) => {
-  const tone = (color: string) => ({
-    border: css`
-      border-left-color: ${color};
-    `,
-    icon: css`
-      color: ${color};
-      flex: 0 0 auto;
-    `,
-  });
+  const tone = (t: StatusTone) => {
+    const color = toneColor(theme, t);
+    return {
+      border: css`
+        border-left-color: ${color};
+      `,
+      icon: css`
+        color: ${color};
+        flex: 0 0 auto;
+      `,
+    };
+  };
   return {
-    card: css`
-      display: flex;
-      gap: ${theme.spacing(1.5)};
-      align-items: flex-start;
-      height: 100%;
-      padding: ${theme.spacing(2)};
-      background: ${theme.colors.background.secondary};
-      border: 1px solid ${theme.colors.border.weak};
-      border-left-width: 3px;
-      border-radius: ${theme.shape.radius.default};
-    `,
+    card: cx(
+      tileBase(theme),
+      css`
+        display: flex;
+        gap: ${theme.spacing(1.5)};
+        align-items: flex-start;
+        height: 100%;
+      `
+    ),
     body: css`
       min-width: 0;
     `,
@@ -81,10 +83,10 @@ const getStyles = (theme: GrafanaTheme2) => {
       }
     `,
     tone: {
-      success: tone(theme.colors.success.text),
-      warning: tone(theme.colors.warning.text),
-      error: tone(theme.colors.error.text),
-      neutral: tone(theme.colors.text.secondary),
+      success: tone('success'),
+      warning: tone('warning'),
+      error: tone('error'),
+      neutral: tone('neutral'),
     },
   };
 };

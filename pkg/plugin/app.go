@@ -48,7 +48,9 @@ type App struct {
 	grafana  *grafanaapi.Client
 	bridge   *bridge.Bridge
 	delivery *DeliveryLog
-	metrics  *bridgeMetrics
+	// metrics is the process-global counter singleton; every App instance shares
+	// the same set (they must live on the one default registry Grafana scrapes).
+	metrics *bridgeMetrics
 
 	// Widget engine: the scheduled-PromQL publisher (shared/widgets.Manager).
 	// widgetCancel cancels its poll context; widgetWG tracks the goroutine that
