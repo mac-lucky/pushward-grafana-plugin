@@ -6,7 +6,16 @@
   "backend": true,
   "executable": "gpx_alerts",
   "info": {
-    "keywords": ["app", "pushward", "alerting", "notifications", "live activities", "apns", "ios", "webhook"],
+    "keywords": [
+      "app",
+      "pushward",
+      "alerting",
+      "notifications",
+      "live activities",
+      "apns",
+      "ios",
+      "webhook"
+    ],
     "description": "Turn Grafana alerts into rich iOS Live Activities. Sets up the webhook contact point and builds a live, history-backed timeline that streams to PushWard over APNs.",
     "author": {
       "name": "PushWard"
@@ -55,32 +64,41 @@
       "path": "/plugins/%PLUGIN_ID%",
       "role": "Admin",
       "addToNav": true
-    },
-    {
-      "type": "dashboard",
-      "name": "PushWard Delivery",
-      "path": "dashboards/delivery.json",
-      "addToNav": false,
-      "defaultNav": false
     }
   ],
   "iam": {
     "permissions": [
-      { "action": "datasources:read", "scope": "datasources:*" },
-      { "action": "datasources:query", "scope": "datasources:*" },
-      { "action": "alert.rules:read", "scope": "folders:*" },
-      { "action": "alert.instances:read" }
+      {
+        "action": "datasources:read",
+        "scope": "datasources:*"
+      },
+      {
+        "action": "datasources:query",
+        "scope": "datasources:*"
+      },
+      {
+        "action": "alert.rules:read",
+        "scope": "folders:*"
+      },
+      {
+        "action": "alert.instances:read"
+      }
     ]
   },
   "extensions": {
     "addedLinks": [
       {
-        "targets": ["grafana/alerting/alertingrule/action", "grafana/alerting/instance/action"],
+        "targets": [
+          "grafana/alerting/alertingrule/action",
+          "grafana/alerting/instance/action"
+        ],
         "title": "View in PushWard",
         "description": "Open the matching Live Activities and delivery log in PushWard."
       },
       {
-        "targets": ["grafana/alerting/alertingrule/action"],
+        "targets": [
+          "grafana/alerting/alertingrule/action"
+        ],
         "title": "Set up PushWard for this alert",
         "description": "Pre-fill the pushward_query annotation so this alert streams a timeline Live Activity."
       }

@@ -57,8 +57,8 @@ type DeliveryLogger interface {
 	Log(alertname, slug, action string, ok bool, detail string)
 }
 
-// Metrics counts bridge activity for CollectMetrics. Optional; a nil Metrics
-// disables counting.
+// Metrics counts bridge activity for the Prometheus counters. Optional; a nil
+// Metrics disables counting.
 type Metrics interface {
 	IncAlertsReceived(n int)
 	IncActivitiesCreated()

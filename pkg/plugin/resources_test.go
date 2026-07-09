@@ -131,6 +131,34 @@ func TestConfigResource(t *testing.T) {
 	}
 }
 
+func TestStatsResource(t *testing.T) {
+	app, _ := newTestApp(t)
+	app.metrics.IncPushesSent()
+
+	resp := callResource(t, app, http.MethodGet, "stats")
+	if resp.Status != http.StatusOK {
+		t.Fatalf("stats status = %d, want 200", resp.Status)
+	}
+	var body BridgeStats
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("decode stats body: %s", err)
+	}
+	if body != app.metrics.Snapshot() {
+		t.Errorf("stats = %+v, want %+v", body, app.metrics.Snapshot())
+	}
+	if body.PushesSent < 1 {
+		t.Errorf("PushesSent = %v, want at least the one push recorded above", body.PushesSent)
+	}
+}
+
+func TestStatsRejectsPost(t *testing.T) {
+	app, _ := newTestApp(t)
+	resp := callResource(t, app, http.MethodPost, "stats")
+	if resp.Status != http.StatusMethodNotAllowed {
+		t.Errorf("POST stats status = %d, want 405", resp.Status)
+	}
+}
+
 func TestUnknownResource404(t *testing.T) {
 	app, _ := newTestApp(t)
 	resp := callResource(t, app, http.MethodGet, "not_found")

@@ -40,6 +40,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/active", a.handleActive)
 	mux.HandleFunc("/widgets", a.handleWidgets)
 	mux.HandleFunc("/history", a.handleHistory)
+	mux.HandleFunc("/stats", a.handleStats)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -401,4 +402,15 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": a.delivery.Entries()})
+}
+
+// handleStats returns the bridge delivery counters as JSON. It reads the same
+// collectors Grafana exports at /metrics/plugins/pushward-alerts-app, so the
+// Overview page shows real numbers without anyone configuring a Prometheus
+// scrape. The counters reset when the plugin process restarts.
+func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
+	if !requireGet(w, r) {
+		return
+	}
+	writeJSON(w, http.StatusOK, a.metrics.Snapshot())
 }

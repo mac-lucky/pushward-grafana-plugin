@@ -4,7 +4,7 @@
 
 A Grafana App plugin that turns Grafana alerts into PushWard Live Activities on your iPhone: a live timeline sparkline on the Lock Screen and Dynamic Island that updates while an alert is firing and closes out when it resolves. It can also poll PromQL on a schedule and publish the results as PushWard iOS Home and Lock Screen widgets, so it replaces the standalone `pushward-grafana` container.
 
-What it is: the in-Grafana setup and management layer for PushWard. One click wires up a webhook contact point, validates your key, and (with the backend) builds the timeline inside Grafana, so there is no separate container and no extra Prometheus config. It reuses your existing Grafana datasource.
+What it is: the in-Grafana setup and management layer for PushWard. One click wires up a webhook contact point, validates your key, and (with the backend) builds the timeline inside Grafana, so there is no separate container to run and no separate Prometheus scrape config for the bridge to read alert history. It reuses your existing Grafana datasource.
 
 What it isn't: a native contact-point type. Grafana hardcodes those in core, so no third party can add one; every integration, including Grafana's own OnCall, delivers over a webhook contact point. This plugin makes that setup first-class, it does not replace the webhook.
 
@@ -60,6 +60,12 @@ Then enable the app under Administration > Plugins > PushWard and open its Confi
 2. Paste your `hlk_` key and pick the datasource to read history from.
 3. Run Connect. It creates the webhook contact point and a scoped viewer service-account token, and routes your alerts to it.
 4. Optional: tune severity mapping, history window, and poll interval, and declare widgets. Fire a test timeline to confirm the whole path before you depend on it.
+
+## Delivery metrics
+
+The backend counts what it delivers: alerts received, activities created, pushes sent, and delivery errors. The Overview page shows the current values. Nothing to configure, and no datasource involved.
+
+The counters reset when Grafana restarts the plugin's backend process. If you want history rather than a live count, they are also exported in Prometheus format at `/metrics/plugins/pushward-alerts-app` as `pushward_alerts_received_total`, `pushward_activities_created_total`, `pushward_pushes_sent_total`, and `pushward_errors_total`, so you can point an existing scrape job at them. That is optional and nothing in the plugin depends on it.
 
 ## Provision (GitOps)
 

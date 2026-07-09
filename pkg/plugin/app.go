@@ -26,11 +26,15 @@ import (
 // Ensure App implements the SDK interfaces it relies on. CallResource is served
 // through a custom method (so each request can refresh the Grafana connection)
 // rather than the embedded httpadapter.
+//
+// backend.CollectMetricsHandler is deliberately absent: backend.Manage never
+// wires one up (ServeOpts has no such field) and hands prometheus.DefaultGatherer
+// straight to the diagnostics adapter, so the counters reach Grafana by being
+// registered on the default registry. See metrics.go.
 var (
 	_ backend.CallResourceHandler   = (*App)(nil)
 	_ instancemgmt.InstanceDisposer = (*App)(nil)
 	_ backend.CheckHealthHandler    = (*App)(nil)
-	_ backend.CollectMetricsHandler = (*App)(nil)
 )
 
 // App is the PushWard Grafana app-plugin backend. It owns the embedded bridge
@@ -92,7 +96,7 @@ func NewApp(ctx context.Context, settings backend.AppInstanceSettings) (instance
 	app := &App{
 		settings:   s,
 		delivery:   NewDeliveryLog(),
-		metrics:    newBridgeMetrics(),
+		metrics:    sharedBridgeMetrics(),
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 	}
 
@@ -356,15 +360,6 @@ func (a *App) probeAPIKeyCached(ctx context.Context) (probeStatus, string) {
 	a.probeStat, a.probeDetail, a.probeAt, a.probeCached = st, det, time.Now(), true
 	a.probeMu.Unlock()
 	return st, det
-}
-
-// CollectMetrics exposes the bridge's Prometheus counters to Grafana.
-func (a *App) CollectMetrics(_ context.Context, _ *backend.CollectMetricsRequest) (*backend.CollectMetricsResult, error) {
-	payload, err := a.metrics.gather()
-	if err != nil {
-		return nil, err
-	}
-	return &backend.CollectMetricsResult{PrometheusMetrics: payload}, nil
 }
 
 // grafanaConn returns the Grafana app URL and the IAM external service-account

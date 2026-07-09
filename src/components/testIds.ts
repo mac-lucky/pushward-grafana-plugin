@@ -21,6 +21,7 @@ export const testIds = {
   overview: {
     container: 'data-testid pg-overview-container',
     status: 'data-testid pg-overview-status',
+    stats: 'data-testid pg-overview-stats',
   },
   connect: {
     container: 'data-testid pg-connect-container',

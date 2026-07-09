@@ -3,16 +3,30 @@ import { css } from '@emotion/css';
 import { GrafanaTheme2 } from '@grafana/data';
 import { PluginPage } from '@grafana/runtime';
 import { Alert, Card, Divider, Grid, Icon, LoadingPlaceholder, Text, useStyles2 } from '@grafana/ui';
-import { ApiKeyStatus, ConfigResponse, errorMessage, getConfig, getHealthz, HealthzResponse } from '../api';
+import {
+  ApiKeyStatus,
+  ConfigResponse,
+  errorMessage,
+  getConfig,
+  getHealthz,
+  getStats,
+  HealthzResponse,
+  StatsResponse,
+} from '../api';
 import { ACTIVITIES_HREF, CONFIG_HREF, CONNECT_HREF } from '../constants';
 import { testIds } from '../components/testIds';
 import { PageHero } from '../components/ui/PageHero';
+import { StatCard, StatCardProps } from '../components/ui/StatCard';
 import { StatusCard, StatusCardProps } from '../components/ui/StatusCard';
 
+// stats is optional in the ready state: the delivery counters are the least
+// critical panel, so a failed /stats read hides only the Delivery section
+// rather than erroring the whole page (e.g. an older backend without the route
+// during a rolling restart).
 type LoadState =
   | { status: 'loading' }
   | { status: 'error'; error: string }
-  | { status: 'ready'; health: HealthzResponse; config: ConfigResponse };
+  | { status: 'ready'; health: HealthzResponse; config: ConfigResponse; stats?: StatsResponse };
 
 const ok = (title: string, description: string): StatusCardProps => ({
   tone: 'success',
@@ -77,16 +91,28 @@ function statusCards(health: HealthzResponse, config: ConfigResponse): StatusCar
   ];
 }
 
+function statCards(stats: StatsResponse): StatCardProps[] {
+  return [
+    { tone: 'neutral', value: stats.alertsReceived, label: 'Alerts received' },
+    { tone: 'success', value: stats.activitiesCreated, label: 'Activities created' },
+    { tone: 'success', value: stats.pushesSent, label: 'Pushes sent' },
+    { tone: stats.errors > 0 ? 'error' : 'neutral', value: stats.errors, label: 'Delivery errors' },
+  ];
+}
+
 function Overview() {
   const s = useStyles2(getStyles);
   const [state, setState] = useState<LoadState>({ status: 'loading' });
 
   useEffect(() => {
     let active = true;
+    // Stats resolve to undefined on failure so they can't fail the page; the
+    // core status still depends on healthz + config.
+    const stats = getStats().catch(() => undefined);
     Promise.all([getHealthz(), getConfig()])
-      .then(([health, config]) => {
+      .then(async ([health, config]) => {
         if (active) {
-          setState({ status: 'ready', health, config });
+          setState({ status: 'ready', health, config, stats: await stats });
         }
       })
       .catch((e) => {
@@ -158,6 +184,27 @@ function Overview() {
             )}
           </div>
         </section>
+
+        {state.status === 'ready' && state.stats && (
+          <section className={s.section}>
+            <Text element="h2" variant="h4">
+              Delivery
+            </Text>
+            <div className={s.sectionBody}>
+              <div data-testid={testIds.overview.stats}>
+                <Grid minColumnWidth={21} gap={2}>
+                  {statCards(state.stats).map((card) => (
+                    <StatCard key={card.label} {...card} />
+                  ))}
+                </Grid>
+              </div>
+              <p className={s.muted}>
+                Counted since the plugin backend last started. Also exported in Prometheus format at{' '}
+                <code>/metrics/plugins/pushward-alerts-app</code> if you want to keep history across restarts.
+              </p>
+            </div>
+          </section>
+        )}
 
         <section className={s.section}>
           <Text element="h2" variant="h4">

@@ -123,6 +123,16 @@ export interface HistoryResponse {
   entries: HistoryEntry[];
 }
 
+// Bridge delivery counters, read straight off the same Prometheus collectors
+// Grafana exports at /metrics/plugins/pushward-alerts-app. They reset when the
+// plugin's backend process restarts.
+export interface StatsResponse {
+  alertsReceived: number;
+  activitiesCreated: number;
+  pushesSent: number;
+  errors: number;
+}
+
 // One alert the embedded bridge is currently tracking. Lets the Activities page
 // map an activity slug to the alert identity needed to build silence matchers
 // (ruleUid preferred, alertname as fallback).
@@ -166,6 +176,10 @@ export async function getWidgets(): Promise<WidgetsResponse> {
 
 export function getHistory(): Promise<HistoryResponse> {
   return getBackendSrv().get<HistoryResponse>(`${RESOURCE_BASE_URL}/history`);
+}
+
+export function getStats(): Promise<StatsResponse> {
+  return getBackendSrv().get<StatsResponse>(`${RESOURCE_BASE_URL}/stats`);
 }
 
 export async function getActive(): Promise<ActiveResponse> {
