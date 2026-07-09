@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0
+
+- Delivery counters (alerts received, activities created, pushes sent, errors) now show on the Overview page with no setup. They were previously registered in a way the plugin SDK never exported, so nothing surfaced them.
+- The same counters are exported in Prometheus format at `/metrics/plugins/pushward-alerts-app` if you want to keep history across restarts.
+- Removed the bundled `PushWard Delivery` dashboard. Its panels needed a Prometheus scrape job against Grafana's own metrics endpoint, so it showed "No data" out of the box; the Overview page replaces it.
+
 ## 0.3.0
 
 - Silence a firing alert's rule from the Activities page (uses your Grafana session).
