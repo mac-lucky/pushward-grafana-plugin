@@ -61,6 +61,8 @@ Then enable the app under Administration > Plugins > PushWard and open its Confi
 3. Run Connect. It creates the webhook contact point and a scoped viewer service-account token, and routes your alerts to it.
 4. Optional: tune severity mapping, history window, and poll interval, and declare widgets. Fire a test timeline to confirm the whole path before you depend on it.
 
+Turn on **Also send a push notification** if you want a normal banner / Lock Screen push alongside the timeline Live Activity: one active notification when an alert starts firing and a passive one when it resolves. The Live Activity is quiet by design, so this is the switch to flip when you want an alert to actively interrupt. It is off by default and applies to every alert routed to the PushWard contact point.
+
 ## Delivery metrics
 
 The backend counts what it delivers: alerts received, activities created, pushes sent, and delivery errors. The Overview page shows the current values. Nothing to configure, and no datasource involved.

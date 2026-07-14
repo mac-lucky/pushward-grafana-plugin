@@ -51,6 +51,7 @@ export type AppPluginSettings = {
   smoothing?: boolean;
   scale?: string;
   decimals?: number;
+  alsoNotify?: boolean;
   widgets?: WidgetConfig[];
 };
 
@@ -67,6 +68,7 @@ const DEFAULTS: Required<AppPluginSettings> = {
   smoothing: true,
   scale: 'linear',
   decimals: 1,
+  alsoNotify: false,
   widgets: [],
 };
 
@@ -151,6 +153,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     smoothing: jsonData?.smoothing ?? DEFAULTS.smoothing,
     scale: jsonData?.scale ?? DEFAULTS.scale,
     decimals: jsonData?.decimals ?? DEFAULTS.decimals,
+    alsoNotify: jsonData?.alsoNotify ?? DEFAULTS.alsoNotify,
     apiKey: '',
     isApiKeySet: Boolean(secureJsonFields?.apiKey),
     isWebhookTokenSet: Boolean(secureJsonFields?.webhookToken),
@@ -280,6 +283,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         smoothing: state.smoothing,
         scale: state.scale,
         decimals: state.decimals,
+        alsoNotify: state.alsoNotify,
         widgets,
       },
       // Only send the secret when the user typed a new one - never overwrite a
@@ -404,6 +408,17 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
             value={state.historyWindow}
             placeholder={DEFAULTS.historyWindow}
             onChange={onChangeText}
+          />
+        </Field>
+
+        <Field
+          label="Also send a push notification"
+          description="Also deliver a normal push notification (banner / Lock Screen) when an alert fires and resolves, in addition to the timeline Live Activity."
+        >
+          <Switch
+            data-testid={testIds.appConfig.alsoNotify}
+            value={state.alsoNotify}
+            onChange={(e) => setState({ ...state, alsoNotify: e.currentTarget.checked })}
           />
         </Field>
 

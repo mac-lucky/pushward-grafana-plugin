@@ -36,6 +36,15 @@ const (
 	annUnit          = "pushward_unit"
 	annSummary       = "summary"
 
+	// Length caps for the optional "also send a notification" push. Subtitle/body
+	// mirror the standalone relay's Grafana notification shape; the title cap
+	// matches the server limit (notification_handler.go). Truncating the title is
+	// defensive: alertname is <=256 today only because CreateActivity already
+	// capped it, but that invariant shouldn't be load-bearing here.
+	maxNotifyTitleRunes    = 256
+	maxNotifySubtitleRunes = 80
+	maxNotifyBodyRunes     = 120
+
 	// webhookTimeout bounds slow Prometheus/PushWard calls for a single async
 	// webhook so they can be interrupted rather than blocking indefinitely.
 	webhookTimeout = 30 * time.Second
@@ -82,6 +91,10 @@ type Config struct {
 	Smoothing       *bool
 	Scale           string
 	Decimals        *int
+	// AlsoNotify sends a normal push notification (banner / Lock Screen)
+	// alongside the timeline Live Activity: one when an alert starts firing and
+	// one when it resolves. Off by default.
+	AlsoNotify bool
 }
 
 // Bridge receives Grafana webhook alert notifications and creates PushWard
@@ -342,6 +355,16 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 
 	severity := b.resolveSeverity(a)
 
+	// Optionally fire a normal push notification once per new alert. Deferred so
+	// it runs after the timeline create/update rather than ahead of it: the push
+	// call retries internally under the shared webhook deadline, so sending it
+	// inline would delay - and on a degraded /notifications endpoint could cancel
+	// - the core Live Activity update. Deferring also covers the no-values early
+	// return, so the user is still notified when the alert carries no values yet.
+	if isNew && b.cfg.AlsoNotify {
+		defer b.sendAlertNotification(ctx, logger, a, slug, alertname, false)
+	}
+
 	// For new alerts, fetch history first so we can derive current values with
 	// proper metric labels instead of Grafana expression ref IDs (B, C).
 	var history map[string][]pushward.HistoryPoint
@@ -493,20 +516,25 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 	content.Icon = resolvedIcon
 	content.AccentColor = pushward.ColorGreen
 
-	err := b.pwClient.UpdateActivity(ctx, slug, pushward.UpdateRequest{
+	if err := b.pwClient.UpdateActivity(ctx, slug, pushward.UpdateRequest{
 		State:   pushward.StateEnded,
 		Content: content,
-	})
-	if err != nil {
+	}); err != nil {
 		logger.Error("failed to end activity", "error", err)
 		b.recordError()
 		b.record(alertname, slug, "resolved", false, err.Error())
-		return
+	} else {
+		logger.Info("activity ended")
+		b.recordPushSent()
+		b.record(alertname, slug, "resolved", true, "")
 	}
 
-	logger.Info("activity ended")
-	b.recordPushSent()
-	b.record(alertname, slug, "resolved", true, "")
+	// Fire the passive "resolved" push regardless of the ended-update outcome: if
+	// that update failed the activity is still live on-device, which is exactly
+	// when the user most needs the resolved notification.
+	if b.cfg.AlsoNotify {
+		b.sendAlertNotification(ctx, logger, a, slug, alertname, true)
+	}
 }
 
 // finalValues returns the values to send on the terminal ENDED update, keyed by
@@ -660,6 +688,64 @@ func (b *Bridge) buildContent(a alert, severity string, values map[string]float6
 	}
 
 	return content
+}
+
+// buildAlertNotification builds the optional normal push notification for an
+// alert, mirroring the standalone relay's Grafana notification shape so the two
+// PushWard-Grafana paths look identical on device. Firing notifications are
+// active (they alert the user); resolved notifications are passive. The
+// CollapseID keys per alertname so a firing push is replaced by its resolved
+// push rather than stacking.
+func buildAlertNotification(a alert, alertname string, resolved bool) pushward.SendNotificationRequest {
+	subtitle := "Grafana"
+	if instance := a.Labels["instance"]; instance != "" {
+		subtitle = text.Truncate("Grafana · "+instance, maxNotifySubtitleRunes)
+	}
+
+	req := pushward.SendNotificationRequest{
+		Title:      text.Truncate(alertname, maxNotifyTitleRunes),
+		Subtitle:   subtitle,
+		ThreadID:   "grafana",
+		CollapseID: text.SlugHash("grafana", alertname, 6),
+		Source:     "grafana",
+		Push:       true,
+	}
+
+	summary := a.Annotations[annSummary]
+	if resolved {
+		req.Level = pushward.LevelPassive
+		if summary != "" {
+			req.Body = text.Truncate("Resolved · "+summary, maxNotifyBodyRunes)
+		} else {
+			req.Body = "Resolved"
+		}
+	} else {
+		req.Level = pushward.LevelActive
+		if summary != "" {
+			req.Body = text.Truncate(summary, maxNotifyBodyRunes)
+		} else {
+			// The server rejects an empty body (minLength 1), so fall back to the
+			// alert name for a summary-less alert. alertname is never empty (the
+			// caller substitutes "Grafana Alert" for anonymous alerts).
+			req.Body = alertname
+		}
+	}
+	return req
+}
+
+// sendAlertNotification sends a normal push notification for an alert. It is
+// best-effort: a failure is logged and recorded on the /history surface but
+// never darkens the timeline path.
+func (b *Bridge) sendAlertNotification(ctx context.Context, logger *slog.Logger, a alert, slug, alertname string, resolved bool) {
+	req := buildAlertNotification(a, alertname, resolved)
+	if err := b.pwClient.SendNotification(ctx, req); err != nil {
+		logger.Warn("failed to send alert notification", "resolved", resolved, "error", err)
+		b.recordError()
+		b.record(alertname, slug, "notify", false, err.Error())
+		return
+	}
+	b.recordPushSent()
+	b.record(alertname, slug, "notified", true, req.Level)
 }
 
 // ruleUIDFor extracts the Grafana alert-rule UID from an alert's generatorURL,
@@ -882,19 +968,26 @@ func (b *Bridge) endAlertActivity(ctx context.Context, alertname string, state *
 		content.Value = any(values)
 	}
 
-	err := b.pwClient.UpdateActivity(ctx, state.slug, pushward.UpdateRequest{
+	if err := b.pwClient.UpdateActivity(ctx, state.slug, pushward.UpdateRequest{
 		State:   pushward.StateEnded,
 		Content: content,
-	})
-	if err != nil {
+	}); err != nil {
 		logger.Error("failed to end resolved activity", "error", err)
 		b.recordError()
 		b.record(alertname, state.slug, "resolved", false, err.Error())
-		return
+	} else {
+		logger.Info("activity ended (alert no longer firing)")
+		b.recordPushSent()
+		b.record(alertname, state.slug, "resolved", true, "alert no longer firing")
 	}
-	logger.Info("activity ended (alert no longer firing)")
-	b.recordPushSent()
-	b.record(alertname, state.slug, "resolved", true, "alert no longer firing")
+
+	// Also notify on the backstop resolve so a dropped resolved-webhook still
+	// alerts the user. There is no webhook payload here, so the push carries only
+	// the alert name (no instance/summary) - an empty alert yields the plain
+	// "Grafana"/"Resolved" notification.
+	if b.cfg.AlsoNotify {
+		b.sendAlertNotification(ctx, logger, alert{}, state.slug, alertname, true)
+	}
 }
 
 // record forwards a delivery outcome to the optional DeliveryLogger.

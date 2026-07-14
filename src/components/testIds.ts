@@ -14,6 +14,7 @@ export const testIds = {
     smoothing: 'data-testid ac-smoothing',
     scale: 'data-testid ac-scale',
     decimals: 'data-testid ac-decimals',
+    alsoNotify: 'data-testid ac-also-notify',
     widgets: 'data-testid ac-widgets',
     widgetsExample: 'data-testid ac-widgets-example',
     submit: 'data-testid ac-submit-form',

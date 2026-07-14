@@ -20,6 +20,7 @@ const (
 	defaultScale         = "linear"
 	defaultDecimals      = 1
 	defaultSmoothing     = true
+	defaultAlsoNotify    = false
 	defaultHistoryWindow = 30 * time.Minute
 	defaultPollInterval  = 30 * time.Second
 	defaultCleanupDelay  = 15 * time.Minute
@@ -49,6 +50,11 @@ type Settings struct {
 	Smoothing       bool
 	Scale           string
 	Decimals        int
+
+	// AlsoNotify, when true, sends a normal push notification (banner / Lock
+	// Screen) alongside the timeline Live Activity when an alert fires and when
+	// it resolves. Off by default: the Live Activity alone is the base behavior.
+	AlsoNotify bool
 
 	// Widgets are the scheduled-PromQL widget specs published to the server
 	// widget API. Empty when no widgets are configured (the engine stays off).
@@ -80,6 +86,7 @@ type rawJSONData struct {
 	Smoothing       *bool  `json:"smoothing"`
 	Scale           string `json:"scale"`
 	Decimals        *int   `json:"decimals"`
+	AlsoNotify      *bool  `json:"alsoNotify"`
 	// Widgets is the raw widget array, parsed + validated by the widgets
 	// package. Kept as RawMessage so a malformed entry yields a precise
 	// per-widget error instead of failing the whole jsonData unmarshal.
@@ -109,6 +116,7 @@ func LoadSettings(s backend.AppInstanceSettings) (*Settings, error) {
 		Smoothing:       defaultSmoothing,
 		Scale:           firstNonEmpty(raw.Scale, defaultScale),
 		Decimals:        defaultDecimals,
+		AlsoNotify:      defaultAlsoNotify,
 	}
 	if raw.Priority != nil {
 		out.Priority = *raw.Priority
@@ -118,6 +126,9 @@ func LoadSettings(s backend.AppInstanceSettings) (*Settings, error) {
 	}
 	if raw.Decimals != nil {
 		out.Decimals = *raw.Decimals
+	}
+	if raw.AlsoNotify != nil {
+		out.AlsoNotify = *raw.AlsoNotify
 	}
 
 	// Parse widgets out of band: a malformed entry must not fail the whole
