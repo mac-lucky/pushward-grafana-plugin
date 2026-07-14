@@ -33,7 +33,7 @@ func TestStartPollerIfTracked(t *testing.T) {
 	})
 
 	// Entry absent (resolved/swept already): must not start a poller.
-	if b.startPollerIfTracked("key", "slug", "up", "", nil) {
+	if b.startPollerIfTracked("key", "slug", "up", "", "", nil) {
 		t.Fatal("started a poller for an alert that is no longer tracked")
 	}
 	if n := poller.ActiveCount(); n != 0 {
@@ -42,7 +42,7 @@ func TestStartPollerIfTracked(t *testing.T) {
 
 	// Entry present: must start exactly one poller.
 	b.active["key"] = &alertState{slug: "slug"}
-	if !b.startPollerIfTracked("key", "slug", "up", "", nil) {
+	if !b.startPollerIfTracked("key", "slug", "up", "", "", nil) {
 		t.Fatal("did not start a poller for a tracked alert")
 	}
 	if n := poller.ActiveCount(); n != 1 {

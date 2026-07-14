@@ -59,10 +59,82 @@ func SeriesKey(labels map[string]string, preferLabel string) string {
 		key = strings.Join(parts, ", ")
 	}
 
-	if utf8.RuneCountInString(key) > 32 {
-		key = string([]rune(key)[:31]) + "…"
+	if utf8.RuneCountInString(key) > maxSeriesKeyRunes {
+		key = string([]rune(key)[:maxSeriesKeyRunes-1]) + "…"
 	}
 	return key
+}
+
+// Mirrored PushWard server Content limits. The server (model.Content.Validate)
+// is the source of truth and the shared contract package does not export them,
+// so they are mirrored here to keep the emitted timeline payload valid rather
+// than 422-ing. Keep in sync with pushward-server model.Content.Validate.
+const (
+	maxTimelineSeries = 10  // model.MaxTimelineSeries: timeline values/history series
+	maxStateRunes     = 256 // content.state
+	maxUnitRunes      = 32  // content.unit
+	maxSeriesKeyRunes = 32  // timeline value/series key + primary_series
+)
+
+// capSeries bounds values to at most maxTimelineSeries entries. Selection is
+// deterministic (sorted keys) so the kept set is stable across poller ticks - an
+// unstable set would churn the server-accumulated sparkline history. primary,
+// when set and present, is always retained so the headline series survives the
+// cap. Returns the same map (identity) and false when already within the limit.
+func capSeries(values map[string]float64, primary string) (map[string]float64, bool) {
+	if len(values) <= maxTimelineSeries {
+		return values, false
+	}
+
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	kept := make(map[string]float64, maxTimelineSeries)
+	if primary != "" {
+		if v, ok := values[primary]; ok {
+			kept[primary] = v
+		}
+	}
+	for _, k := range keys {
+		if len(kept) >= maxTimelineSeries {
+			break
+		}
+		if _, exists := kept[k]; exists {
+			continue
+		}
+		kept[k] = values[k]
+	}
+	return kept, true
+}
+
+// capHistory restricts history to the given kept value keys so the value and
+// history series stay aligned after capSeries trims the value map. The fast path
+// returns the same map (identity) when every history key already survives.
+func capHistory(history map[string][]pushward.HistoryPoint, keep map[string]float64) map[string][]pushward.HistoryPoint {
+	if len(history) == 0 {
+		return history
+	}
+	extra := false
+	for k := range history {
+		if _, ok := keep[k]; !ok {
+			extra = true
+			break
+		}
+	}
+	if !extra {
+		return history
+	}
+
+	out := make(map[string][]pushward.HistoryPoint, len(keep))
+	for k, pts := range history {
+		if _, ok := keep[k]; ok {
+			out[k] = pts
+		}
+	}
+	return out
 }
 
 // MetricsClient queries Prometheus or VictoriaMetrics for time-series data.

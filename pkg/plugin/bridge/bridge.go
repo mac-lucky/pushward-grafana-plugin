@@ -31,6 +31,11 @@ const (
 
 	activeAlertCap = 500 // max concurrent tracked alerts; new entries are dropped when full
 
+	// Alert annotation keys the bridge reads to shape the timeline.
+	annPrimarySeries = "pushward_primary_series"
+	annUnit          = "pushward_unit"
+	annSummary       = "summary"
+
 	// webhookTimeout bounds slow Prometheus/PushWard calls for a single async
 	// webhook so they can be interrupted rather than blocking indefinitely.
 	webhookTimeout = 30 * time.Second
@@ -109,10 +114,15 @@ type alertState struct {
 	// ruleUID is the Grafana alert-rule UID extracted from the alert's
 	// generatorURL (empty when it can't be parsed). It's the preferred silence
 	// matcher (__alert_rule_uid__) for the management UI's "Silence" action.
-	ruleUID      string
-	expr         string
-	refID        string
-	seriesLabel  string
+	ruleUID     string
+	expr        string
+	refID       string
+	seriesLabel string
+	// primary is the pushward_primary_series annotation captured at create time.
+	// Stored so the terminal ENDED update (incl. the annotation-free alertmanager
+	// backstop) caps to the same headline series the poller kept, instead of
+	// pruning it as an orphan on the last frame.
+	primary      string
 	lastSeen     time.Time
 	fingerprints map[string]struct{}
 	// lastValues records the series keys + values most recently sent to the
@@ -292,7 +302,8 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 		}
 		b.active[mapKey] = &alertState{
 			slug: slug, alertname: a.Labels["alertname"], ruleUID: b.ruleUIDFor(a),
-			seriesLabel: seriesLabel, lastSeen: time.Now(),
+			seriesLabel: seriesLabel, primary: a.Annotations[annPrimarySeries],
+			lastSeen:     time.Now(),
 			fingerprints: map[string]struct{}{a.Fingerprint: {}},
 		}
 	} else {
@@ -355,11 +366,19 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 			// timeline seed with empty values would be rejected 422, so we can't
 			// seed here.)
 			seed := b.buildContent(a, severity, nil)
-			if b.startPollerIfTracked(mapKey, slug, expr, seriesLabel, &seed) {
+			if b.startPollerIfTracked(mapKey, slug, expr, seriesLabel, a.Annotations[annPrimarySeries], &seed) {
 				logger.Info("poller started (will seed on first values)")
 			}
 		}
 		return
+	}
+
+	primary := a.Annotations[annPrimarySeries]
+	if capped, trimmed := capSeries(values, primary); trimmed {
+		logger.Warn("timeline series capped to server limit",
+			"limit", maxTimelineSeries, "dropped", len(values)-len(capped))
+		values = capped
+		history = capHistory(history, values)
 	}
 
 	content := b.buildContent(a, severity, values)
@@ -391,7 +410,7 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 	}
 
 	if isNew && expr != "" {
-		if b.startPollerIfTracked(mapKey, slug, expr, seriesLabel, nil) {
+		if b.startPollerIfTracked(mapKey, slug, expr, seriesLabel, primary, nil) {
 			logger.Info("poller started")
 		}
 	}
@@ -407,13 +426,13 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 // running forever against an already-ended activity. poller.Start/StartWithSeed
 // take only p.mu, never b.mu, so there is no lock-ordering cycle. Returns whether
 // a poller was started.
-func (b *Bridge) startPollerIfTracked(mapKey, slug, expr, seriesLabel string, seed *pushward.Content) bool {
+func (b *Bridge) startPollerIfTracked(mapKey, slug, expr, seriesLabel, primary string, seed *pushward.Content) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if _, ok := b.active[mapKey]; !ok {
 		return false // resolved or swept while this firing was still in flight
 	}
-	b.poller.StartWithSeed(slug, expr, seriesLabel, seed)
+	b.poller.StartWithSeed(slug, expr, seriesLabel, primary, seed)
 	return true
 }
 
@@ -453,6 +472,7 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 	seriesLabel := state.seriesLabel
 	expr := state.expr
 	lastValues := state.lastValues
+	primary := state.primary
 	delete(b.active, mapKey)
 	b.mu.Unlock()
 
@@ -467,6 +487,7 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 	if len(values) == 0 {
 		values = b.resolveValues(a, refID, seriesLabel)
 	}
+	values, _ = capSeries(values, primary)
 
 	content := b.buildContent(a, severity, values)
 	content.Icon = resolvedIcon
@@ -554,6 +575,9 @@ func (b *Bridge) resolveValues(a alert, preferredRefID, seriesLabel string) map[
 	if label == "" {
 		label = "Value"
 	}
+	// label becomes a timeline value-map key; the server rejects keys over
+	// maxSeriesKeyRunes, so cap it as SeriesKey does for metric-derived keys.
+	label = text.TruncateHard(label, maxSeriesKeyRunes)
 
 	// Single ref ID match — use alertname as key for backward compatibility.
 	if preferredRefID != "" {
@@ -606,8 +630,8 @@ func (b *Bridge) buildContent(a alert, severity string, values map[string]float6
 		Decimals:    b.cfg.Decimals,
 	}
 
-	if v, ok := a.Annotations["pushward_unit"]; ok {
-		content.Unit = v
+	if v, ok := a.Annotations[annUnit]; ok {
+		content.Unit = text.TruncateHard(v, maxUnitRunes)
 	}
 
 	if v, ok := a.Annotations["pushward_threshold"]; ok {
@@ -619,10 +643,10 @@ func (b *Bridge) buildContent(a alert, severity string, values map[string]float6
 		}
 	}
 
-	if summary, ok := a.Annotations["summary"]; ok {
-		content.State = summary
+	if summary, ok := a.Annotations[annSummary]; ok {
+		content.State = text.Truncate(summary, maxStateRunes)
 	} else {
-		content.State = a.Labels["alertname"]
+		content.State = text.Truncate(a.Labels["alertname"], maxStateRunes)
 	}
 
 	// A multi-series timeline defaults its headline to the alphabetically first
@@ -631,7 +655,7 @@ func (b *Bridge) buildContent(a alert, severity string, values map[string]float6
 	// single-series timeline ignores it) so it also rides the poller-seeded path
 	// where the firing webhook carried no values. Skipped past the server's
 	// 32-rune cap so a stray value can't reject the whole update.
-	if v := a.Annotations["pushward_primary_series"]; v != "" && len([]rune(v)) <= 32 {
+	if v := a.Annotations[annPrimarySeries]; v != "" && len([]rune(v)) <= maxSeriesKeyRunes {
 		content.PrimarySeries = v
 	}
 
@@ -842,6 +866,7 @@ func (b *Bridge) endAlertActivity(ctx context.Context, alertname string, state *
 	logger := slog.With("alertname", alertname, "slug", state.slug)
 
 	values := b.finalValues(ctx, state.expr, state.seriesLabel, state.lastValues)
+	values, _ = capSeries(values, state.primary)
 
 	content := pushward.Content{
 		Template:    templateTimeline,

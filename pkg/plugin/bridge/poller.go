@@ -57,10 +57,12 @@ func NewPoller(q MetricsQuerier, pw *pushward.Client, interval time.Duration) *P
 
 // Start begins polling for the given slug and PromQL expression.
 // seriesLabel is the preferred metric label to use as series key (can be empty for auto-detect).
+// primary is the series that drives the iOS headline; it is retained when a poll
+// yields more than the server's series limit and capSeries has to trim (empty is fine).
 // No-op if already polling for this slug. Use Start when the firing webhook has
 // already seeded the activity's timeline template/styling.
-func (p *Poller) Start(slug, expr, seriesLabel string) {
-	p.StartWithSeed(slug, expr, seriesLabel, nil)
+func (p *Poller) Start(slug, expr, seriesLabel, primary string) {
+	p.StartWithSeed(slug, expr, seriesLabel, primary, nil)
 }
 
 // StartWithSeed is like Start but, when seed is non-nil, the poller sends a full
@@ -68,7 +70,7 @@ func (p *Poller) Start(slug, expr, seriesLabel string) {
 // successful tick (then value-only patches thereafter). Used when the firing
 // webhook had no values to seed with, so the activity would otherwise be left on
 // the generic template while ONGOING.
-func (p *Poller) StartWithSeed(slug, expr, seriesLabel string, seed *pushward.Content) {
+func (p *Poller) StartWithSeed(slug, expr, seriesLabel, primary string, seed *pushward.Content) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -80,7 +82,7 @@ func (p *Poller) StartWithSeed(slug, expr, seriesLabel string, seed *pushward.Co
 	done := make(chan struct{})
 	p.active[slug] = &pollHandle{cancel: cancel, done: done}
 	p.wg.Add(1)
-	go p.run(ctx, slug, expr, seriesLabel, seed, done)
+	go p.run(ctx, slug, expr, seriesLabel, primary, seed, done)
 }
 
 // Stop cancels the polling goroutine for the given slug (asynchronous; does not
@@ -151,7 +153,7 @@ func (p *Poller) SetUpdateCallback(cb UpdateCallback) {
 	p.mu.Unlock()
 }
 
-func (p *Poller) run(ctx context.Context, slug, expr, seriesLabel string, seed *pushward.Content, done chan struct{}) {
+func (p *Poller) run(ctx context.Context, slug, expr, seriesLabel, primary string, seed *pushward.Content, done chan struct{}) {
 	defer p.wg.Done()
 	defer close(done) // signal StopAndWait that this goroutine has fully exited
 
@@ -169,14 +171,14 @@ func (p *Poller) run(ctx context.Context, slug, expr, seriesLabel string, seed *
 			logger.Info("poller stopped")
 			return
 		case <-ticker.C:
-			seeded = p.poll(ctx, logger, slug, expr, seriesLabel, seed, seeded)
+			seeded = p.poll(ctx, logger, slug, expr, seriesLabel, primary, seed, seeded)
 		}
 	}
 }
 
 // poll queries the metric and pushes an update, returning the (possibly updated)
 // seeded state.
-func (p *Poller) poll(ctx context.Context, logger *slog.Logger, slug, expr, seriesLabel string, seed *pushward.Content, seeded bool) bool {
+func (p *Poller) poll(ctx context.Context, logger *slog.Logger, slug, expr, seriesLabel, primary string, seed *pushward.Content, seeded bool) bool {
 	points, err := p.metricsClient.QueryInstantAll(ctx, expr, time.Now())
 	if err != nil {
 		if ctx.Err() != nil {
@@ -194,6 +196,14 @@ func (p *Poller) poll(ctx context.Context, logger *slog.Logger, slug, expr, seri
 	for _, lp := range points {
 		key := SeriesKey(lp.Labels, seriesLabel)
 		values[key] = lp.Point.Value
+	}
+	if capped, trimmed := capSeries(values, primary); trimmed {
+		// Steady-state continuation of a condition handleFiring already Warn'd
+		// once; Debug here so a persistently oversized series set doesn't spam
+		// Warn every tick for the life of the alert.
+		logger.Debug("timeline series capped to server limit",
+			"limit", maxTimelineSeries, "dropped", len(values)-len(capped))
+		values = capped
 	}
 
 	if !seeded {

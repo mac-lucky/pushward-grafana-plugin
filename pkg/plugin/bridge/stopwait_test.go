@@ -19,7 +19,7 @@ func TestStopAndWaitDrains(t *testing.T) {
 		poller.Wait()
 	})
 
-	poller.StartWithSeed("slug", "up", "", nil)
+	poller.StartWithSeed("slug", "up", "", "", nil)
 	if n := poller.ActiveCount(); n != 1 {
 		t.Fatalf("ActiveCount = %d, want 1 after start", n)
 	}
