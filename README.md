@@ -1,6 +1,8 @@
 # PushWard for Grafana
 
 [![CI](https://github.com/mac-lucky/pushward-grafana-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/mac-lucky/pushward-grafana-plugin/actions/workflows/ci.yml)
+[![Website](https://img.shields.io/badge/pushward.app-5B4FE5?logo=safari&logoColor=white)](https://pushward.app)
+[![App Store](https://img.shields.io/badge/App_Store-Download-0D96F6?logo=apple&logoColor=white)](https://apps.apple.com/app/id6759689999)
 
 A Grafana App plugin that turns Grafana alerts into PushWard Live Activities on your iPhone: a live timeline sparkline on the Lock Screen and Dynamic Island that updates while an alert is firing and closes out when it resolves. It can also poll PromQL on a schedule and publish the results as PushWard iOS Home and Lock Screen widgets, so it replaces the standalone `pushward-grafana` container.
 
