@@ -49,16 +49,16 @@ GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=pushward-alerts-app
 
 # Optional: let Grafana download and install the plugin on startup (Grafana 11.5+),
 # instead of dropping the unzipped files into the plugins volume yourself.
-GF_PLUGINS_PREINSTALL=pushward-alerts-app@0.3.0@https://github.com/mac-lucky/pushward-grafana-plugin/releases/download/v0.3.0/pushward-alerts-app-0.3.0.zip
+GF_PLUGINS_PREINSTALL=pushward-alerts-app@0.5.0@https://github.com/mac-lucky/pushward-grafana-plugin/releases/download/v0.5.0/pushward-alerts-app-0.5.0.zip
 ```
 
 Bump the version in both the tag and the file name to match the release you want. Without `PREINSTALL`, mount the unzipped plugin into the plugins volume and keep only the allowlist var.
 
-Then enable the app under Administration > Plugins > PushWard and open its Configuration page.
+Then enable the app under Administration > Plugins and data > Plugins > PushWard and open its Configuration page.
 
 ## Configure
 
-1. Open Administration > Plugins > PushWard > Configuration.
+1. Open Administration > Plugins and data > Plugins > PushWard > Configuration.
 2. Paste your `hlk_` key and pick the datasource to read history from.
 3. Run Connect. It creates the webhook contact point and a scoped viewer service-account token, and routes your alerts to it.
 4. Optional: tune severity mapping, history window, and poll interval, and declare widgets. Fire a test timeline to confirm the whole path before you depend on it.
