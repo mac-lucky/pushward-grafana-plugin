@@ -118,6 +118,7 @@ func NewApp(ctx context.Context, settings backend.AppInstanceSettings) (instance
 		Scale:           s.Scale,
 		Decimals:        &s.Decimals,
 		AlsoNotify:      s.AlsoNotify,
+		NotifyLevel:     s.NotifyLevel,
 	})
 
 	// Seed the Grafana connection from the construction context if present; it is

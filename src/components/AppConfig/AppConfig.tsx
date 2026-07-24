@@ -52,6 +52,7 @@ export type AppPluginSettings = {
   scale?: string;
   decimals?: number;
   alsoNotify?: boolean;
+  notifyLevel?: string;
   widgets?: WidgetConfig[];
 };
 
@@ -69,12 +70,21 @@ const DEFAULTS: Required<AppPluginSettings> = {
   scale: 'linear',
   decimals: 1,
   alsoNotify: false,
+  notifyLevel: 'active',
   widgets: [],
 };
 
 const SCALE_OPTIONS: Array<ComboboxOption<string>> = [
   { label: 'Linear', value: 'linear' },
   { label: 'Logarithmic', value: 'logarithmic' },
+];
+
+// Push-notification interruption level, mapped to the PushWard server's own
+// level enum: Silent -> passive, Normal -> active, Critical -> critical.
+const NOTIFY_LEVEL_OPTIONS: Array<{ label: string; value: string }> = [
+  { label: 'Silent', value: 'passive' },
+  { label: 'Normal', value: 'active' },
+  { label: 'Critical', value: 'critical' },
 ];
 
 // Consistent field widths so the form columns line up: wider for free text,
@@ -154,6 +164,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     scale: jsonData?.scale ?? DEFAULTS.scale,
     decimals: jsonData?.decimals ?? DEFAULTS.decimals,
     alsoNotify: jsonData?.alsoNotify ?? DEFAULTS.alsoNotify,
+    notifyLevel: jsonData?.notifyLevel ?? DEFAULTS.notifyLevel,
     apiKey: '',
     isApiKeySet: Boolean(secureJsonFields?.apiKey),
     isWebhookTokenSet: Boolean(secureJsonFields?.webhookToken),
@@ -284,6 +295,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         scale: state.scale,
         decimals: state.decimals,
         alsoNotify: state.alsoNotify,
+        notifyLevel: state.notifyLevel,
         widgets,
       },
       // Only send the secret when the user typed a new one - never overwrite a
@@ -421,6 +433,20 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
             onChange={(e) => setState({ ...state, alsoNotify: e.currentTarget.checked })}
           />
         </Field>
+
+        {state.alsoNotify && (
+          <Field
+            label="Notification priority"
+            description="How intrusive the push is (fire and resolve both use this). Silent: quiet, Lock Screen only. Normal: alerts as usual. Critical: breaks through Focus / silent mode (needs the critical-alert entitlement on your PushWard account, otherwise delivered as time-sensitive)."
+          >
+            <RadioButtonGroup
+              data-testid={testIds.appConfig.notifyLevel}
+              options={NOTIFY_LEVEL_OPTIONS}
+              value={state.notifyLevel}
+              onChange={(v) => setState({ ...state, notifyLevel: v ?? DEFAULTS.notifyLevel })}
+            />
+          </Field>
+        )}
 
         <ControlledCollapse label="Advanced timeline options" isOpen={false}>
           <Field label="Poll interval" description="How often firing alerts are re-queried (e.g. 30s).">

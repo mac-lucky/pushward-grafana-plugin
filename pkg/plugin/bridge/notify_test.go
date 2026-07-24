@@ -124,6 +124,21 @@ func TestAlsoNotifyFiringSendsActiveNotification(t *testing.T) {
 	}
 }
 
+func TestAlsoNotifyFiringUsesConfiguredLevel(t *testing.T) {
+	s := newStubServer(t)
+	b := newTestBridge(t, s.URL, Config{AlsoNotify: true, NotifyLevel: pushward.LevelCritical, SeverityLabel: "severity", DefaultSeverity: "warning"})
+
+	b.handleFiring(context.Background(), firingAlert())
+
+	notif := s.find(http.MethodPost, "/notifications")
+	if notif == nil {
+		t.Fatal("expected a POST /notifications when AlsoNotify is on, got none")
+	}
+	if got := notif.body["level"]; got != pushward.LevelCritical {
+		t.Errorf("notification level = %v, want %q", got, pushward.LevelCritical)
+	}
+}
+
 func TestAlsoNotifyOffSendsNoNotification(t *testing.T) {
 	s := newStubServer(t)
 	b := newTestBridge(t, s.URL, Config{AlsoNotify: false, SeverityLabel: "severity", DefaultSeverity: "warning"})
@@ -138,36 +153,49 @@ func TestAlsoNotifyOffSendsNoNotification(t *testing.T) {
 	}
 }
 
-func TestAlsoNotifyResolvedSendsPassiveNotification(t *testing.T) {
-	s := newStubServer(t)
-	b := newTestBridge(t, s.URL, Config{AlsoNotify: true, SeverityLabel: "severity", DefaultSeverity: "warning"})
-
-	// Seed the alert as already tracked so handleResolved ends it.
-	const mapKey = "HighCPU"
-	b.active[mapKey] = &alertState{
-		slug:         makeSlug(mapKey),
-		alertname:    "HighCPU",
-		fingerprints: map[string]struct{}{"fp1": {}},
-		lastSeen:     time.Now(),
+func TestAlsoNotifyResolvedCarriesConfiguredLevel(t *testing.T) {
+	cases := []struct {
+		name      string
+		cfgLevel  string
+		wantLevel string
+	}{
+		{name: "default config resolves at active", cfgLevel: "", wantLevel: pushward.LevelActive},
+		{name: "silent config resolves at passive", cfgLevel: pushward.LevelPassive, wantLevel: pushward.LevelPassive},
+		{name: "critical config resolves at critical", cfgLevel: pushward.LevelCritical, wantLevel: pushward.LevelCritical},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStubServer(t)
+			b := newTestBridge(t, s.URL, Config{AlsoNotify: true, NotifyLevel: tc.cfgLevel, SeverityLabel: "severity", DefaultSeverity: "warning"})
 
-	b.handleResolved(context.Background(), alert{
-		Status:      alertStatusResolved,
-		Fingerprint: "fp1",
-		Labels:      map[string]string{"alertname": "HighCPU"},
-		Annotations: map[string]string{"summary": "CPU back to normal"},
-	})
+			// Seed the alert as already tracked so handleResolved ends it.
+			const mapKey = "HighCPU"
+			b.active[mapKey] = &alertState{
+				slug:         makeSlug(mapKey),
+				alertname:    "HighCPU",
+				fingerprints: map[string]struct{}{"fp1": {}},
+				lastSeen:     time.Now(),
+			}
 
-	notif := s.find(http.MethodPost, "/notifications")
-	if notif == nil {
-		t.Fatal("expected a POST /notifications on resolve when AlsoNotify is on, got none")
-	}
-	if got := notif.body["level"]; got != pushward.LevelPassive {
-		t.Errorf("notification level = %v, want %q", got, pushward.LevelPassive)
-	}
-	body, _ := notif.body["body"].(string)
-	if !strings.HasPrefix(body, "Resolved") || !strings.Contains(body, "CPU back to normal") {
-		t.Errorf("notification body = %q, want it to start with Resolved and include the summary", body)
+			b.handleResolved(context.Background(), alert{
+				Status:      alertStatusResolved,
+				Fingerprint: "fp1",
+				Labels:      map[string]string{"alertname": "HighCPU"},
+				Annotations: map[string]string{"summary": "CPU back to normal"},
+			})
+
+			notif := s.find(http.MethodPost, "/notifications")
+			if notif == nil {
+				t.Fatal("expected a POST /notifications on resolve when AlsoNotify is on, got none")
+			}
+			if got := notif.body["level"]; got != tc.wantLevel {
+				t.Errorf("notification level = %v, want %q", got, tc.wantLevel)
+			}
+			body, _ := notif.body["body"].(string)
+			if !strings.HasPrefix(body, "Resolved") || !strings.Contains(body, "CPU back to normal") {
+				t.Errorf("notification body = %q, want it to start with Resolved and include the summary", body)
+			}
+		})
 	}
 }
 
@@ -181,45 +209,58 @@ func TestBuildAlertNotification(t *testing.T) {
 		a         alert
 		alertname string
 		resolved  bool
+		level     string
 		wantLevel string
 		wantBody  string
 		wantSub   string
 	}{
 		{
-			name:      "firing with summary",
+			name:      "firing with summary (normal)",
 			a:         alert{Labels: map[string]string{"instance": "node-1"}, Annotations: map[string]string{"summary": "CPU is high"}},
-			alertname: "HighCPU", resolved: false,
+			alertname: "HighCPU", resolved: false, level: pushward.LevelActive,
 			wantLevel: pushward.LevelActive, wantBody: "CPU is high", wantSub: "Grafana · node-1",
 		},
 		{
-			name:      "firing without summary falls back to alertname",
+			name:      "firing without summary falls back to alertname (empty level defaults active)",
 			a:         alert{Labels: map[string]string{}},
-			alertname: "HighCPU", resolved: false,
+			alertname: "HighCPU", resolved: false, level: "",
 			wantLevel: pushward.LevelActive, wantBody: "HighCPU", wantSub: "Grafana",
 		},
 		{
-			name:      "resolved with summary",
+			name:      "firing silent uses passive",
+			a:         alert{Annotations: map[string]string{"summary": "CPU is high"}},
+			alertname: "HighCPU", resolved: false, level: pushward.LevelPassive,
+			wantLevel: pushward.LevelPassive, wantBody: "CPU is high", wantSub: "Grafana",
+		},
+		{
+			name:      "resolved carries the configured level (normal)",
 			a:         alert{Annotations: map[string]string{"summary": "CPU back to normal"}},
-			alertname: "HighCPU", resolved: true,
+			alertname: "HighCPU", resolved: true, level: pushward.LevelActive,
+			wantLevel: pushward.LevelActive, wantBody: "Resolved · CPU back to normal", wantSub: "Grafana",
+		},
+		{
+			name:      "resolved silent uses passive",
+			a:         alert{Annotations: map[string]string{"summary": "CPU back to normal"}},
+			alertname: "HighCPU", resolved: true, level: pushward.LevelPassive,
 			wantLevel: pushward.LevelPassive, wantBody: "Resolved · CPU back to normal", wantSub: "Grafana",
 		},
 		{
 			name:      "resolved without summary (backstop empty alert)",
 			a:         alert{},
-			alertname: "HighCPU", resolved: true,
-			wantLevel: pushward.LevelPassive, wantBody: "Resolved", wantSub: "Grafana",
+			alertname: "HighCPU", resolved: true, level: pushward.LevelActive,
+			wantLevel: pushward.LevelActive, wantBody: "Resolved", wantSub: "Grafana",
 		},
 		{
-			name:      "anonymous alert uses fallback title as body",
+			name:      "anonymous alert critical uses fallback title as body",
 			a:         alert{},
-			alertname: "Grafana Alert", resolved: false,
-			wantLevel: pushward.LevelActive, wantBody: "Grafana Alert", wantSub: "Grafana",
+			alertname: "Grafana Alert", resolved: false, level: pushward.LevelCritical,
+			wantLevel: pushward.LevelCritical, wantBody: "Grafana Alert", wantSub: "Grafana",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := buildAlertNotification(tc.a, tc.alertname, tc.resolved)
+			req := buildAlertNotification(tc.a, tc.alertname, tc.resolved, tc.level)
 			if req.Title != tc.alertname {
 				t.Errorf("Title = %q, want %q", req.Title, tc.alertname)
 			}
@@ -246,8 +287,8 @@ func TestBuildAlertNotification(t *testing.T) {
 
 	t.Run("collapse id is stable across firing and resolved", func(t *testing.T) {
 		a := alert{Annotations: map[string]string{"summary": "x"}}
-		firing := buildAlertNotification(a, "HighCPU", false)
-		resolved := buildAlertNotification(a, "HighCPU", true)
+		firing := buildAlertNotification(a, "HighCPU", false, pushward.LevelActive)
+		resolved := buildAlertNotification(a, "HighCPU", true, pushward.LevelActive)
 		if firing.CollapseID != resolved.CollapseID {
 			t.Errorf("collapse ids differ (%q vs %q): the resolved push would stack instead of replacing the firing one",
 				firing.CollapseID, resolved.CollapseID)
@@ -262,7 +303,7 @@ func TestBuildAlertNotification(t *testing.T) {
 			Labels:      map[string]string{"instance": strings.Repeat("y", 200)},
 			Annotations: map[string]string{"summary": strings.Repeat("x", 500)},
 		}
-		req := buildAlertNotification(a, "HighCPU", false)
+		req := buildAlertNotification(a, "HighCPU", false, pushward.LevelActive)
 		if n := utf8.RuneCountInString(req.Subtitle); n > maxNotifySubtitleRunes {
 			t.Errorf("Subtitle rune count = %d, want <= %d", n, maxNotifySubtitleRunes)
 		}

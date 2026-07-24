@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
+	"github.com/mac-lucky/pushward-integrations/shared/pushward"
 
 	"github.com/mac-lucky/pushward-grafana-plugin/pkg/plugin/widgets"
 )
@@ -21,6 +22,7 @@ const (
 	defaultDecimals      = 1
 	defaultSmoothing     = true
 	defaultAlsoNotify    = false
+	defaultNotifyLevel   = pushward.LevelActive
 	defaultHistoryWindow = 30 * time.Minute
 	defaultPollInterval  = 30 * time.Second
 	defaultCleanupDelay  = 15 * time.Minute
@@ -32,6 +34,16 @@ const (
 	secureKeyAPIKey       = "apiKey"
 	secureKeyWebhookToken = "webhookToken"
 )
+
+// validNotifyLevels is the set of interruption levels the config UI exposes for
+// the optional alert push notification (Silent / Normal / Critical). An unknown
+// value falls back to defaultNotifyLevel rather than reaching the server, which
+// would reject anything outside its own enum.
+var validNotifyLevels = map[string]bool{
+	pushward.LevelPassive:  true, // Silent
+	pushward.LevelActive:   true, // Normal
+	pushward.LevelCritical: true, // Critical
+}
 
 // Settings is the parsed plugin configuration: non-secret jsonData merged with
 // secret secureJsonData and defaults applied. Durations are parsed from their
@@ -55,6 +67,11 @@ type Settings struct {
 	// Screen) alongside the timeline Live Activity when an alert fires and when
 	// it resolves. Off by default: the Live Activity alone is the base behavior.
 	AlsoNotify bool
+
+	// NotifyLevel is the interruption level for the AlsoNotify push (both the
+	// firing and resolved notifications). One of passive (Silent) / active
+	// (Normal) / critical (Critical); defaults to active.
+	NotifyLevel string
 
 	// Widgets are the scheduled-PromQL widget specs published to the server
 	// widget API. Empty when no widgets are configured (the engine stays off).
@@ -87,6 +104,7 @@ type rawJSONData struct {
 	Scale           string `json:"scale"`
 	Decimals        *int   `json:"decimals"`
 	AlsoNotify      *bool  `json:"alsoNotify"`
+	NotifyLevel     string `json:"notifyLevel"`
 	// Widgets is the raw widget array, parsed + validated by the widgets
 	// package. Kept as RawMessage so a malformed entry yields a precise
 	// per-widget error instead of failing the whole jsonData unmarshal.
@@ -117,6 +135,7 @@ func LoadSettings(s backend.AppInstanceSettings) (*Settings, error) {
 		Scale:           firstNonEmpty(raw.Scale, defaultScale),
 		Decimals:        defaultDecimals,
 		AlsoNotify:      defaultAlsoNotify,
+		NotifyLevel:     defaultNotifyLevel,
 	}
 	if raw.Priority != nil {
 		out.Priority = *raw.Priority
@@ -129,6 +148,9 @@ func LoadSettings(s backend.AppInstanceSettings) (*Settings, error) {
 	}
 	if raw.AlsoNotify != nil {
 		out.AlsoNotify = *raw.AlsoNotify
+	}
+	if validNotifyLevels[raw.NotifyLevel] {
+		out.NotifyLevel = raw.NotifyLevel
 	}
 
 	// Parse widgets out of band: a malformed entry must not fail the whole

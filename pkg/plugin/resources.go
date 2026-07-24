@@ -235,7 +235,7 @@ func (a *App) handleTest(w http.ResponseWriter, r *http.Request) {
 			Body:     "Your Grafana → PushWard connection works.",
 			ThreadID: "grafana",
 			Source:   "grafana",
-			Level:    pushward.LevelActive,
+			Level:    firstNonEmpty(a.settings.NotifyLevel, pushward.LevelActive),
 			Push:     true,
 		})
 		msg = "Test notification sent — check your iPhone."

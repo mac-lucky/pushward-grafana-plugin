@@ -95,6 +95,10 @@ type Config struct {
 	// alongside the timeline Live Activity: one when an alert starts firing and
 	// one when it resolves. Off by default.
 	AlsoNotify bool
+	// NotifyLevel is the interruption level applied to both the firing and
+	// resolved AlsoNotify pushes: passive (Silent) / active (Normal) / critical
+	// (Critical). Empty defaults to active.
+	NotifyLevel string
 }
 
 // Bridge receives Grafana webhook alert notifications and creates PushWard
@@ -692,11 +696,16 @@ func (b *Bridge) buildContent(a alert, severity string, values map[string]float6
 
 // buildAlertNotification builds the optional normal push notification for an
 // alert, mirroring the standalone relay's Grafana notification shape so the two
-// PushWard-Grafana paths look identical on device. Firing notifications are
-// active (they alert the user); resolved notifications are passive. The
-// CollapseID keys per alertname so a firing push is replaced by its resolved
-// push rather than stacking.
-func buildAlertNotification(a alert, alertname string, resolved bool) pushward.SendNotificationRequest {
+// PushWard-Grafana paths look identical on device. level is the configured
+// interruption level (passive/active/critical) and governs both the firing and
+// resolved pushes; an empty level defaults to active so a zero-value Config
+// still alerts. The CollapseID keys per alertname so a firing push is replaced
+// by its resolved push rather than stacking.
+func buildAlertNotification(a alert, alertname string, resolved bool, level string) pushward.SendNotificationRequest {
+	if level == "" {
+		level = pushward.LevelActive
+	}
+
 	subtitle := "Grafana"
 	if instance := a.Labels["instance"]; instance != "" {
 		subtitle = text.Truncate("Grafana · "+instance, maxNotifySubtitleRunes)
@@ -708,19 +717,18 @@ func buildAlertNotification(a alert, alertname string, resolved bool) pushward.S
 		ThreadID:   "grafana",
 		CollapseID: text.SlugHash("grafana", alertname, 6),
 		Source:     "grafana",
+		Level:      level,
 		Push:       true,
 	}
 
 	summary := a.Annotations[annSummary]
 	if resolved {
-		req.Level = pushward.LevelPassive
 		if summary != "" {
 			req.Body = text.Truncate("Resolved · "+summary, maxNotifyBodyRunes)
 		} else {
 			req.Body = "Resolved"
 		}
 	} else {
-		req.Level = pushward.LevelActive
 		if summary != "" {
 			req.Body = text.Truncate(summary, maxNotifyBodyRunes)
 		} else {
@@ -737,7 +745,7 @@ func buildAlertNotification(a alert, alertname string, resolved bool) pushward.S
 // best-effort: a failure is logged and recorded on the /history surface but
 // never darkens the timeline path.
 func (b *Bridge) sendAlertNotification(ctx context.Context, logger *slog.Logger, a alert, slug, alertname string, resolved bool) {
-	req := buildAlertNotification(a, alertname, resolved)
+	req := buildAlertNotification(a, alertname, resolved, b.cfg.NotifyLevel)
 	if err := b.pwClient.SendNotification(ctx, req); err != nil {
 		logger.Warn("failed to send alert notification", "resolved", resolved, "error", err)
 		b.recordError()

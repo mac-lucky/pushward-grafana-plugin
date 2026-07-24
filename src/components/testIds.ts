@@ -15,6 +15,7 @@ export const testIds = {
     scale: 'data-testid ac-scale',
     decimals: 'data-testid ac-decimals',
     alsoNotify: 'data-testid ac-also-notify',
+    notifyLevel: 'data-testid ac-notify-level',
     widgets: 'data-testid ac-widgets',
     widgetsExample: 'data-testid ac-widgets-example',
     submit: 'data-testid ac-submit-form',
