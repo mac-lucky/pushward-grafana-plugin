@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 - Optionally send a normal push notification alongside the timeline Live Activity when an alert fires and resolves, with a Silent / Normal / Critical priority. Silent is a quiet Lock Screen entry, Normal alerts as usual, and Critical breaks through Focus and silent mode (needs the critical-alert entitlement on your PushWard account, otherwise it is delivered as time-sensitive). Off by default; the priority applies to both the firing and resolved push.
 
