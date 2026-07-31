@@ -279,8 +279,8 @@ func TestBuildAlertNotification(t *testing.T) {
 			if req.ThreadID != "grafana" || req.Source != "grafana" {
 				t.Errorf("ThreadID/Source = %q/%q, want grafana/grafana", req.ThreadID, req.Source)
 			}
-			if !req.Push {
-				t.Error("Push must be true so the notification actually alerts")
+			if req.Push == nil || !*req.Push {
+				t.Error("Push must be explicitly true so the notification actually alerts")
 			}
 		})
 	}

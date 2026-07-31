@@ -236,7 +236,7 @@ func (a *App) handleTest(w http.ResponseWriter, r *http.Request) {
 			ThreadID: "grafana",
 			Source:   "grafana",
 			Level:    firstNonEmpty(a.settings.NotifyLevel, pushward.LevelActive),
-			Push:     true,
+			Push:     pushward.BoolPtr(true),
 		})
 		msg = "Test notification sent — check your iPhone."
 	}

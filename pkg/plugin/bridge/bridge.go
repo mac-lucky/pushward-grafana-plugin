@@ -718,7 +718,7 @@ func buildAlertNotification(a alert, alertname string, resolved bool, level stri
 		CollapseID: text.SlugHash("grafana", alertname, 6),
 		Source:     "grafana",
 		Level:      level,
-		Push:       true,
+		Push:       pushward.BoolPtr(true),
 	}
 
 	summary := a.Annotations[annSummary]
