@@ -1,10 +1,10 @@
 module github.com/mac-lucky/pushward-grafana-plugin
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/grafana/grafana-plugin-sdk-go v0.292.1
-	github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260704220032-449dadd676e7
+	github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260731030651-ac552e0dbe0b
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 )
