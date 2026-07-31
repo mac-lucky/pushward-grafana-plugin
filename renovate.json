@@ -1,4 +1,11 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>mac-lucky/actions-shared-workflows"]
+  "extends": ["github>mac-lucky/actions-shared-workflows"],
+  "packageRules": [
+    {
+      "description": "playwright 1.62 cannot resolve the package-style extends (@grafana/tsconfig) in .config/tsconfig.json; hold until the Grafana scaffold supports it",
+      "matchPackageNames": ["@playwright/test"],
+      "allowedVersions": "<1.62.0"
+    }
+  ]
 }
