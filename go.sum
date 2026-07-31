@@ -131,6 +131,8 @@ github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260731030651-ac552e0d
 github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260731030651-ac552e0dbe0b/go.mod h1:nOktmZJnW4LHz9xelO3VxkXpr9v4ApQ0AwOVcEbYQbk=
 github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260731065721-169b83416678 h1:H6vK7ychzpzuulj/NckNiXL0QfUR62cGEebhyU2Jhp0=
 github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260731065721-169b83416678/go.mod h1:nOktmZJnW4LHz9xelO3VxkXpr9v4ApQ0AwOVcEbYQbk=
+github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260731074442-f49b9f74dd43 h1:2coe5Cw9F/LafXulwKvxT3kV+w1/WtUTbTkzylDXsEA=
+github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260731074442-f49b9f74dd43/go.mod h1:nOktmZJnW4LHz9xelO3VxkXpr9v4ApQ0AwOVcEbYQbk=
 github.com/magefile/mage v1.17.2 h1:fyXVu1eadI8Ap1HCCNgEhJ5McIWiYhLR8uol64ZZc40=
 github.com/magefile/mage v1.17.2/go.mod h1:Yj51kqllmsgFpvvSzgrZPK9WtluG3kUhFaBUVLo4feA=
 github.com/mattetti/filebuffer v1.0.1 h1:gG7pyfnSIZCxdoKq+cPa8T0hhYtD9NxCdI4D7PTjRLM=
