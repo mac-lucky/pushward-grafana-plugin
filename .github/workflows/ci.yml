@@ -197,8 +197,12 @@ jobs:
         with:
           url: http://localhost:3000/login
 
+      # The -- separator matters: npm 12 validates its own CLI flags instead of
+      # passing unrecognised ones through, so without it --with-deps is read as
+      # an npm flag and the command dies with EUNKNOWNCONFIG before Playwright
+      # runs. Harmless on npm 11.
       - name: Install Playwright Browsers
-        run: npm exec playwright install chromium --with-deps
+        run: npm exec -- playwright install chromium --with-deps
 
       - name: Run Playwright tests
         id: run-tests
