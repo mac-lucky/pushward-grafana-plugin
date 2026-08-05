@@ -3,7 +3,7 @@ module github.com/mac-lucky/pushward-grafana-plugin
 go 1.26.5
 
 require (
-	github.com/grafana/grafana-plugin-sdk-go v0.294.0
+	github.com/grafana/grafana-plugin-sdk-go v0.296.0
 	github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260731113736-e4075be837da
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
@@ -75,7 +75,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
-	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
+	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
