@@ -6,6 +6,16 @@
       "description": "playwright 1.62 cannot resolve the package-style extends (@grafana/tsconfig) in .config/tsconfig.json; hold until the Grafana scaffold supports it",
       "matchPackageNames": ["@playwright/test"],
       "allowedVersions": "<1.62.0"
+    },
+    {
+      "description": "@grafana/eslint-config 10 dropped the ./flat.js subpath export that .config/eslint.config.mjs imports, and peers @stylistic/eslint-plugin >=5 in place of @stylistic/eslint-plugin-ts; @grafana/create-plugin 7.9.2 still scaffolds both the flat.js import and ^9.0.0, so hold until the scaffold moves",
+      "matchPackageNames": ["@grafana/eslint-config"],
+      "allowedVersions": "<10.0.0"
+    },
+    {
+      "description": "eslint 10 has no lockfile solution here: eslint-plugin-react 7.37.5 still peers eslint <=^9.7 and the Grafana scaffold pins ^9.32.0; lift once both support 10",
+      "matchPackageNames": ["eslint"],
+      "allowedVersions": "<10.0.0"
     }
   ]
 }
