@@ -187,6 +187,20 @@ jobs:
       - name: Install dev dependencies
         run: npm ci
 
+      # .npmrc sets ignore-scripts=true, so nothing downloads browsers on
+      # install; without this cache every matrix leg re-downloads chromium.
+      # Keyed on the resolved package version, not the lockfile hash, so an
+      # unrelated dependency bump does not re-upload the browser bundle.
+      - name: Get Playwright version
+        id: playwright-version
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
       - name: Start Grafana
         run: |
           docker compose pull

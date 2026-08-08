@@ -19,6 +19,14 @@ jobs:
         with:
           persist-credentials: false
 
+      # build-plugin's internal setup-node has no cache input, so its npm ci
+      # pulled every package from the registry on each release. This earlier
+      # setup-node restores ~/.npm (keyed on package-lock.json) for it.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
       - uses: grafana/plugin-actions/build-plugin@8b12a2d6fa5fc0939a6bf75905453d4b505ef29a # build-plugin/v1.2.0
         with:
           # build-plugin defaults to Node 20 and Go 1.25; match the CI build
