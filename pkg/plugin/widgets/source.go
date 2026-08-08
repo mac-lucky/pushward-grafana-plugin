@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"text/template"
@@ -62,6 +63,86 @@ func (s *ScalarSource) Value(ctx context.Context) (float64, error) {
 	return v, nil
 }
 
+// Trend sparkline bounds, mirrored from pushward-server: fewer than 2 or more
+// than 48 points is rejected.
+const (
+	trendMinPoints = 2
+	trendMaxPoints = 48
+)
+
+// TrendSource is a scalar source that also keeps the rolling sample buffer the
+// trend template draws as a sparkline. Grafana is queried for one instant value
+// per tick; a reading that differs from the last always lands in the buffer,
+// and the oldest is dropped once it is full.
+//
+// Value reports ErrNoData until there are trendMinPoints, which leaves the
+// manager's widget create deferred rather than posting a payload the server
+// would reject. Both methods run on the manager's one goroutine for this
+// widget, so the buffer needs no locking.
+type TrendSource struct {
+	ScalarSource
+	repeatGap  time.Duration
+	points     []float64
+	lastAppend time.Time
+}
+
+// NewTrendSource builds a trend source whose repeat gap is sized off the poll
+// interval.
+func NewTrendSource(q Querier, expr string, interval time.Duration) *TrendSource {
+	return &TrendSource{ScalarSource: ScalarSource{Q: q, Expr: expr}, repeatGap: trendRepeatGap(interval)}
+}
+
+// trendRepeatGap is how long an unchanged reading is skipped before being
+// recorded again. Mirrors pushward-hass: at the 48-point wire cap, one sample
+// per window/48 is the coarsest useful rate, and the buffer's window here is
+// interval*48, so the gap is the interval with a 60s floor.
+//
+// It only bites below a one-minute interval, which is exactly the case that
+// needs it: at 5s a flat metric flushes 48 minutes of real history out of the
+// buffer in four, leaving a sparkline of 48 identical dots.
+func trendRepeatGap(interval time.Duration) time.Duration {
+	return max(60*time.Second, interval)
+}
+
+// Value implements shared/widgets.ValueSource.
+func (s *TrendSource) Value(ctx context.Context) (float64, error) {
+	v, err := s.ScalarSource.Value(ctx)
+	if err != nil {
+		return 0, err
+	}
+	s.push(v, time.Now())
+	if len(s.points) < trendMinPoints {
+		return 0, sharedwidgets.ErrNoData
+	}
+	return v, nil
+}
+
+// Points implements shared/widgets.PointSource. The copy keeps the live buffer
+// from being aliased into a payload that outlives the tick.
+func (s *TrendSource) Points() []float64 {
+	if len(s.points) < trendMinPoints {
+		return nil
+	}
+	return slices.Clone(s.points)
+}
+
+func (s *TrendSource) push(v float64, now time.Time) {
+	n := len(s.points)
+	// Below the minimum there is no widget yet, so a repeat still has to count:
+	// a metric that starts out flat would otherwise never reach two samples and
+	// never publish at all.
+	if n >= trendMinPoints && s.points[n-1] == v && now.Sub(s.lastAppend) < s.repeatGap {
+		return
+	}
+	s.lastAppend = now
+	if n == trendMaxPoints {
+		copy(s.points, s.points[1:])
+		s.points[trendMaxPoints-1] = v
+		return
+	}
+	s.points = append(s.points, v)
+}
+
 // MultiSource exposes label-keyed fan-out values for queries returning multiple
 // series (one widget per series).
 type MultiSource struct {
@@ -114,7 +195,7 @@ func NewStatListSource(q Querier, rows []StatRowConfig) (sharedwidgets.StatListS
 			missing = defaultMissingValue
 		}
 		compiled[i] = compiledStatRow{
-			label: r.Label, query: r.Query, unit: r.Unit, missing: missing, tpl: tpl,
+			label: r.Label, query: r.Query, unit: r.Unit, missing: missing, tpl: tpl, timer: r.timer,
 		}
 	}
 	return &statListSource{q: q, rows: compiled}, nil
@@ -123,6 +204,7 @@ func NewStatListSource(q Querier, rows []StatRowConfig) (sharedwidgets.StatListS
 type compiledStatRow struct {
 	label, query, unit, missing string
 	tpl                         *template.Template
+	timer                       *pushward.TimerValue
 }
 
 type statListSource struct {
@@ -135,7 +217,7 @@ type statListSource struct {
 // row's MissingValue placeholder, so a transient blip on one query never blanks
 // the whole widget. But when EVERY row's query fails (a total datasource-proxy
 // outage), Rows returns an error so the manager skips the tick and holds the
-// last-good rows instead of publishing an all-placeholder widget — matching the
+// last-good rows instead of publishing an all-placeholder widget - matching the
 // scalar path, which returns ErrNoData on no data. Capturing now once keeps all
 // rows on the same instant.
 func (s *statListSource) Rows(ctx context.Context) ([]pushward.StatRow, error) {
@@ -173,7 +255,7 @@ func (s *statListSource) Rows(ctx context.Context) ([]pushward.StatRow, error) {
 func (s *statListSource) queryRow(ctx context.Context, row compiledStatRow, now time.Time) (pushward.StatRow, error) {
 	points, err := s.q.QueryInstantAll(ctx, row.query, now)
 	if err != nil {
-		return pushward.StatRow{Label: row.label, Value: row.missing, Unit: row.unit}, err
+		return pushward.StatRow{Label: row.label, Value: row.missing, Unit: row.unit, Timer: row.timer}, err
 	}
 	rendered := row.missing
 	if val, ok := firstFinite(points); ok {
@@ -181,7 +263,7 @@ func (s *statListSource) queryRow(ctx context.Context, row compiledStatRow, now 
 			rendered = v
 		}
 	}
-	return pushward.StatRow{Label: row.label, Value: rendered, Unit: row.unit}, nil
+	return pushward.StatRow{Label: row.label, Value: rendered, Unit: row.unit, Timer: row.timer}, nil
 }
 
 func renderStatValue(tpl *template.Template, value float64, unit string) string {

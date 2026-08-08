@@ -14,7 +14,7 @@ What it isn't: a native contact-point type. Grafana hardcodes those in core, so 
 
 - Connect wizard: one click creates the PushWard webhook contact point (no manual URL or header copying) and a scoped service-account token.
 - Embedded timeline bridge: the Go backend queries your Grafana datasource for the alert's metric history and pushes a live timeline Live Activity. No `pushward-grafana` container required.
-- Widget engine: declare `value`, `progress`, `status`, `gauge`, or `stat_list` widgets in the config; the backend polls each on its own interval (`on_change` or `always` mode, multi-series fan-out) and publishes them to your iOS widgets.
+- Widget engine: declare `value`, `progress`, `status`, `gauge`, `stat_list`, `trend` or `countdown` widgets in the config; the backend polls each on its own interval (`on_change` or `always` mode, multi-series fan-out) and publishes them to your iOS widgets.
 - Management: see current Live Activities and a recent delivery log, send a test notification, or fire a test timeline.
 - Alert-rule links: "View in PushWard" on alert rules and instances.
 
@@ -64,6 +64,30 @@ Then enable the app under Administration > Plugins and data > Plugins > PushWard
 4. Optional: tune severity mapping, history window, and poll interval, and declare widgets. Fire a test timeline to confirm the whole path before you depend on it.
 
 Turn on **Also send a push notification** if you want a normal banner / Lock Screen push alongside the timeline Live Activity, one when an alert starts firing and one when it resolves. The Live Activity is quiet by design, so this is the switch to flip when you want an alert to actively interrupt. Pick a **Notification priority** for those pushes: Silent (quiet, Lock Screen only), Normal (a regular alert), or Critical (breaks through Focus and silent mode, if your PushWard account has the critical-alert entitlement, otherwise it falls back to time-sensitive). The priority applies to both the firing and resolved push. It is off by default and applies to every alert routed to the PushWard contact point.
+
+## Widgets
+
+Each entry in the `widgets` array is one query published as an iOS Home or Lock Screen widget. A slug, a query and a template is the whole minimum; everything below is optional.
+
+`trend` draws a sparkline. The plugin keeps the last 48 readings of a widget in memory and sends them alongside the current value, so the chart comes from the poll history rather than a range query. At a 60s interval it fills in 48 minutes. The widget shows up on the second poll, not the first, because two samples is the least the server accepts for a line. Bounds behave differently here than on the other templates: `content.min_value` and `content.max_value` are optional chart limits, and without them the chart auto-scales. Trend needs `query` rather than `query_all` - there is one sample buffer per widget, so a fan-out has nowhere to keep per-series history.
+
+A repeated reading is only recorded once a minute, or once per poll interval if that is longer. Without that, a widget polling every 5s would flush 48 minutes of real history out of the buffer in four and leave you looking at 48 identical dots. A reading that actually moves is always recorded immediately.
+
+`countdown` is the only template with no query. Set `content.end_date` to an RFC 3339 timestamp, optionally `content.start_date` and `content.expired_text`, and the phone counts down on its own with no further pushes. Nothing polls it, so `stale_after` is rejected on a countdown.
+
+`stale_after` is how many seconds after the last update iOS starts dimming a widget as out of date (60 to 604800, blank for never). Setting it also arms a heartbeat: the last published content is re-sent every `max(30s, stale_after/2)`, which the server records as a touch rather than a push, so a metric that sits flat for hours does not make the widget look dead and does not cost you a notification either. The window has to be at least three times the poll interval. The heartbeat fires on a poll tick, so the longest gap between two refreshes is half the window plus one interval; at three the gap stays comfortably inside the window, whereas at two it would land right on the edge and dim the widget once a cycle.
+
+Any template can render its subtitle as a live timer via `content.subtitle_timer` (`{"date": "<RFC 3339>", "style": "timer"` or `"relative"}`), and a `stat_list` row takes the same object as a per-row `timer`. The static `subtitle` and row `value` stay behind them as the fallback. No form fields for these yet, so set them in the JSON view.
+
+`battery`, `schedule` and `flow` exist on the server but not here. Each needs several independent readings in one payload - per-device charge levels, an hourly price curve, the four sides of an energy flow - which one query per widget cannot express. Use the REST API or the Home Assistant integration for those.
+
+### Before you add a trend or countdown widget
+
+These two templates need the PushWard iOS app **1.6.0 or newer**, and the failure on an older build is not a graceful one. The app decodes its widget list in one pass, so a single entry using a template it does not know makes **the entire widget list unavailable** - not just the new widget. Every other widget on that device stops rendering with it.
+
+The app cannot recover on its own, and there is no in-app way to delete the widget that caused it. The fix is to remove the widget from this plugin's config and delete it through the API (`DELETE /widgets/{slug}`), or to update the app.
+
+So: update the app on every device signed into the account before adding one, and remember that includes anything you do not check often, like a spare iPad or a family member's phone. The plugin does not block the choice, because it has no way to see what app version your devices run.
 
 ## Delivery metrics
 

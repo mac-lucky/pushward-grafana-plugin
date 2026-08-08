@@ -3,18 +3,20 @@ import { css } from '@emotion/css';
 import { GrafanaTheme2 } from '@grafana/data';
 import { Button, Combobox, Field, IconButton, Input, Stack, Text, useStyles2, type ComboboxOption } from '@grafana/ui';
 import type { WidgetConfig } from './AppConfig';
+import { creatableTemplates } from '../ui/templateMeta';
 
 // A row of a stat_list widget (subset the form edits; unknown fields ride along).
 type StatRow = { label?: string; query?: string; value_template?: string; unit?: string; [k: string]: unknown };
 type WidgetContent = { [k: string]: unknown };
 
-const TEMPLATE_OPTIONS: Array<ComboboxOption<string>> = [
-  { label: 'Value', value: 'value' },
-  { label: 'Progress', value: 'progress' },
-  { label: 'Status', value: 'status' },
-  { label: 'Gauge', value: 'gauge' },
-  { label: 'Stat list', value: 'stat_list' },
-];
+// Derived from templateMeta so the picker and the tables cannot drift: one
+// place adds a template, both surfaces learn its label.
+const TEMPLATE_OPTIONS: Array<ComboboxOption<string>> = creatableTemplates();
+
+// Templates the iOS app only learned in 1.6.0. An older app cannot render one,
+// and a single unknown template in the list makes the whole widget list
+// unavailable there, so the picker says so at the point of choosing.
+const NEW_IN_1_6 = new Set(['trend', 'countdown']);
 
 const MODE_OPTIONS: Array<ComboboxOption<string>> = [
   { label: 'On change', value: 'on_change' },
@@ -83,11 +85,33 @@ export function WidgetBuilder({ widgets, onChange }: WidgetBuilderProps) {
       if (rows(w).length === 0) {
         patch.stat_rows = [{ label: '', query: '', value_template: '{{ .Value }}', unit: '' }];
       }
+    } else if (template === 'countdown') {
+      // Nothing is polled, so the validator rejects any query here - and
+      // stale_after too, since no poll would ever refresh the widget.
+      patch.query = undefined;
+      patch.query_all = undefined;
+      patch.slug_template = undefined;
+      patch.stat_rows = undefined;
+      patch.stale_after = undefined;
     } else {
       patch.stat_rows = undefined;
-      if (typeof w.query !== 'string' && typeof w.query_all !== 'string') {
+      if (template === 'trend') {
+        // One rolling sample buffer per widget means a fan-out has nowhere to
+        // keep per-series history.
+        patch.query_all = undefined;
+        patch.slug_template = undefined;
+        if (typeof w.query !== 'string') {
+          patch.query = '';
+        }
+      } else if (typeof w.query !== 'string' && typeof w.query_all !== 'string') {
         patch.query = '';
       }
+    }
+    // A leftover date pair is not inert on progress: it makes the bar advance
+    // on device instead of following the query. Drop the countdown fields
+    // anywhere they'd change behaviour rather than be ignored.
+    if (template !== 'countdown' && template !== 'progress') {
+      patch.content = { ...content(w), start_date: undefined, end_date: undefined, expired_text: undefined };
     }
     update(i, patch);
   };
@@ -115,6 +139,8 @@ export function WidgetBuilder({ widgets, onChange }: WidgetBuilderProps) {
       {widgets.map((w, i) => {
         const c = content(w);
         const isStatList = w.template === 'stat_list';
+        const isCountdown = w.template === 'countdown';
+        const isTrend = w.template === 'trend';
         const isRanged = w.template === 'progress' || w.template === 'gauge';
         const isFanout = typeof w.query_all === 'string' && w.query_all !== '';
         return (
@@ -133,7 +159,12 @@ export function WidgetBuilder({ widgets, onChange }: WidgetBuilderProps) {
               <Field label="Name">
                 <Input width={W} value={w.name ?? ''} placeholder={w.slug} onChange={(e) => update(i, { name: e.currentTarget.value })} />
               </Field>
-              <Field label="Template">
+              <Field
+                label="Template"
+                description={
+                  NEW_IN_1_6.has(w.template as string) ? 'Needs the PushWard iOS app 1.6.0 or newer.' : undefined
+                }
+              >
                 <Combobox
                   width={W}
                   options={TEMPLATE_OPTIONS}
@@ -144,12 +175,20 @@ export function WidgetBuilder({ widgets, onChange }: WidgetBuilderProps) {
             </Stack>
 
             {!isStatList &&
+              !isCountdown &&
               (isFanout ? (
                 <Field label="Query (multi-series)" description="Edit query_all / slug_template fan-out in the raw JSON view.">
                   <Input width={W * 2} disabled value={w.query_all as string} />
                 </Field>
               ) : (
-                <Field label="Query" description="PromQL / MetricsQL returning a scalar.">
+                <Field
+                  label="Query"
+                  description={
+                    isTrend
+                      ? 'PromQL / MetricsQL returning a scalar. Each poll adds one sparkline sample, up to 48; the widget appears once two are in.'
+                      : 'PromQL / MetricsQL returning a scalar.'
+                  }
+                >
                   <Input
                     width={W * 2}
                     value={(w.query as string) ?? ''}
@@ -177,11 +216,22 @@ export function WidgetBuilder({ widgets, onChange }: WidgetBuilderProps) {
               <Field label="Icon" description="SF Symbol name">
                 <Input width={NUM_W} value={(c.icon as string) ?? ''} placeholder="chart.bar.fill" onChange={(e) => updateContent(i, { icon: e.currentTarget.value })} />
               </Field>
+              {!isCountdown && (
+                <Field label="Stale after" description="Seconds until iOS dims it. Blank never dims; min 3x interval.">
+                  <Input
+                    width={NUM_W}
+                    type="number"
+                    value={w.stale_after === undefined ? '' : String(w.stale_after)}
+                    placeholder="300"
+                    onChange={(e) => update(i, { stale_after: numOrUndef(e.currentTarget.value) })}
+                  />
+                </Field>
+              )}
             </Stack>
 
-            {isRanged && (
+            {(isRanged || isTrend) && (
               <Stack direction="row" gap={2} wrap="wrap">
-                <Field label="Min value" description="Required for progress/gauge">
+                <Field label="Min value" description={isTrend ? 'Optional chart floor' : 'Required for progress/gauge'}>
                   <Input
                     width={NUM_W}
                     type="number"
@@ -189,12 +239,41 @@ export function WidgetBuilder({ widgets, onChange }: WidgetBuilderProps) {
                     onChange={(e) => updateContent(i, { min_value: numOrUndef(e.currentTarget.value) })}
                   />
                 </Field>
-                <Field label="Max value" description="Required for progress/gauge">
+                <Field label="Max value" description={isTrend ? 'Optional chart ceiling' : 'Required for progress/gauge'}>
                   <Input
                     width={NUM_W}
                     type="number"
                     value={c.max_value === undefined ? '' : String(c.max_value)}
                     onChange={(e) => updateContent(i, { max_value: numOrUndef(e.currentTarget.value) })}
+                  />
+                </Field>
+              </Stack>
+            )}
+
+            {isCountdown && (
+              <Stack direction="row" gap={2} wrap="wrap">
+                <Field label="End date" description="RFC 3339. Required.">
+                  <Input
+                    width={W}
+                    value={(c.end_date as string) ?? ''}
+                    placeholder="2026-12-24T18:00:00Z"
+                    onChange={(e) => updateContent(i, { end_date: e.currentTarget.value })}
+                  />
+                </Field>
+                <Field label="Start date" description="Optional, for the elapsed share.">
+                  <Input
+                    width={W}
+                    value={(c.start_date as string) ?? ''}
+                    placeholder="2026-12-01T00:00:00Z"
+                    onChange={(e) => updateContent(i, { start_date: e.currentTarget.value })}
+                  />
+                </Field>
+                <Field label="Expired text" description="Blank counts up past the end date.">
+                  <Input
+                    width={NUM_W}
+                    value={(c.expired_text as string) ?? ''}
+                    placeholder="Out now"
+                    onChange={(e) => updateContent(i, { expired_text: e.currentTarget.value })}
                   />
                 </Field>
               </Stack>

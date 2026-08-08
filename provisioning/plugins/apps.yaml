@@ -20,6 +20,32 @@ apps:
       smoothing: true
       scale: linear
       decimals: 1
+      # Widgets are left out of the dev defaults on purpose: with a real key in
+      # place the engine publishes them to your phone the moment Grafana boots.
+      # Uncomment to try them. stale_after must be at least 3x the interval,
+      # and countdown takes neither a query nor stale_after.
+      # widgets:
+      #   - slug: cluster-cpu
+      #     name: Cluster CPU
+      #     template: gauge
+      #     query: 100 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100
+      #     interval: 60s
+      #     stale_after: 300
+      #     content: { unit: '%', icon: cpu, min_value: 0, max_value: 100 }
+      #   - slug: request-rate
+      #     name: Requests
+      #     template: trend       # sparkline from the last 48 polls
+      #     query: sum(rate(http_requests_total[5m]))
+      #     interval: 60s
+      #     stale_after: 300
+      #     content: { unit: req/s, icon: chart.line.uptrend.xyaxis }
+      #   - slug: launch
+      #     name: Launch
+      #     template: countdown   # no query; the phone counts down on its own
+      #     content:
+      #       end_date: '2026-12-24T18:00:00Z'
+      #       expired_text: Shipped
+      #       icon: party.popper
     # secureJsonData:
     #   apiKey: hlk_...        # your PushWard integration key
     #   webhookToken: ...      # set automatically by the Connect wizard

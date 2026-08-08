@@ -1,6 +1,7 @@
 package widgets
 
 import (
+	"context"
 	"fmt"
 	"slices"
 
@@ -23,6 +24,8 @@ func BuildSpecs(cfgs []WidgetConfig, q Querier) ([]sharedwidgets.Spec, error) {
 			UpdateMode:     sharedwidgets.UpdateMode(w.UpdateMode),
 			MinChange:      w.MinChange,
 			PushThrottle:   w.PushThrottle,
+			StaleAfter:     w.StaleAfter,
+			Heartbeat:      sharedwidgets.HeartbeatFor(w.StaleAfter),
 			Content:        w.Content.ToWidgetContent(),
 			LabelTemplate:  w.LabelTemplate,
 			SlugTemplate:   w.SlugTemplate,
@@ -31,6 +34,10 @@ func BuildSpecs(cfgs []WidgetConfig, q Querier) ([]sharedwidgets.Spec, error) {
 			CleanupMissing: w.CleanupMissing,
 		}
 		switch {
+		case w.Template == string(pushward.WidgetTemplateCountdown):
+			spec.Source = staticSource
+		case w.Template == string(pushward.WidgetTemplateTrend):
+			spec.Source = NewTrendSource(q, w.Query, w.IntervalDuration())
 		case w.Template == string(pushward.WidgetTemplateStatList):
 			mask := make([]bool, len(w.StatRows))
 			for i, r := range w.StatRows {
@@ -55,3 +62,11 @@ func BuildSpecs(cfgs []WidgetConfig, q Querier) ([]sharedwidgets.Spec, error) {
 	}
 	return specs, nil
 }
+
+// staticSource backs templates that have no metric behind them at all. The
+// manager insists on exactly one source per spec, so a countdown gets one that
+// reports no data forever: the widget is created from its static content and
+// every later tick is a no-op.
+var staticSource = sharedwidgets.ValueSourceFunc(func(context.Context) (float64, error) {
+	return 0, sharedwidgets.ErrNoData
+})
