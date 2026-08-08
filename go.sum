@@ -99,8 +99,8 @@ github.com/gopherjs/gopherjs v0.0.0-20181103185306-d547d1d9531e h1:JKmoR8x90Iww1
 github.com/gopherjs/gopherjs v0.0.0-20181103185306-d547d1d9531e/go.mod h1:wJfORRmW1u3UXTncJ5qlYoELFm8eSnnEO6hX4iZ3EWY=
 github.com/gorilla/mux v1.8.1 h1:TuBL49tXwgrFYWhqrNgrUNEY92u81SPhu7sTdzQEiWY=
 github.com/gorilla/mux v1.8.1/go.mod h1:AKf9I4AEqPTmMytcMc0KkNouC66V3BtZ4qD5fmWSiMQ=
-github.com/grafana/grafana-plugin-sdk-go v0.296.0 h1:FawDVKOv+BPknq6UdQJMGZqbWCVWGxHbeVqqkLrXoeg=
-github.com/grafana/grafana-plugin-sdk-go v0.296.0/go.mod h1:DWmZQakZl3peJdyqUTqNr95n0+BqrwfZBBwuWZhJTyY=
+github.com/grafana/grafana-plugin-sdk-go v0.296.1 h1:7J0tGnR6u+RIT3XCX/T93Fb9BRQR0aHh6gYAYaAy1dw=
+github.com/grafana/grafana-plugin-sdk-go v0.296.1/go.mod h1:DWmZQakZl3peJdyqUTqNr95n0+BqrwfZBBwuWZhJTyY=
 github.com/grafana/otel-profiling-go v0.6.0 h1:W7lOZaJj4IJISXMcM1UBk3fJF3tzF2OD6MJBJaQp1H8=
 github.com/grafana/otel-profiling-go v0.6.0/go.mod h1:cqLIDgNXlnzknJ0WLiEe+JPjZk2MZ4ftMdqRJRWj1ZM=
 github.com/grafana/pyroscope-go/godeltaprof v0.1.12 h1:X6OemT2WcLtxdmNukEQuIp0c+efWVI/tBTd0oeWeDHI=
@@ -133,8 +133,6 @@ github.com/klauspost/cpuid/v2 v2.4.0 h1:S6Hrbc7+ywsr0r+RLapfGBHfyefhCTwEh3A0tV91
 github.com/klauspost/cpuid/v2 v2.4.0/go.mod h1:19jmZ9mjzoF//ddRSUsv0zfBTJWh3QJh9FNxZTMrGxU=
 github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0SNc=
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
-github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260731113736-e4075be837da h1:mVxvQLJhvusXpRbgbzFGuPzco1ygj3Zh0+pf5DSII6E=
-github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260731113736-e4075be837da/go.mod h1:nOktmZJnW4LHz9xelO3VxkXpr9v4ApQ0AwOVcEbYQbk=
 github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260808004359-e3cd6db91694 h1:WiDoPQ/c++ZUPYQmAusZwTCxrHx68mt02YxaBw2NQ4g=
 github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260808004359-e3cd6db91694/go.mod h1:nOktmZJnW4LHz9xelO3VxkXpr9v4ApQ0AwOVcEbYQbk=
 github.com/magefile/mage v1.17.2 h1:fyXVu1eadI8Ap1HCCNgEhJ5McIWiYhLR8uol64ZZc40=
