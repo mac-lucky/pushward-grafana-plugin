@@ -3,8 +3,8 @@ module github.com/mac-lucky/pushward-grafana-plugin
 go 1.26.5
 
 require (
-	github.com/grafana/grafana-plugin-sdk-go v0.296.1
-	github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260810001020-89f1181dd046
+	github.com/grafana/grafana-plugin-sdk-go v0.296.2
+	github.com/mac-lucky/pushward-integrations/shared v0.0.0-20260810071750-7405a0ed3dd4
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
 )
