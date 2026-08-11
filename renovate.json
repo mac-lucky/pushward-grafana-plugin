@@ -16,6 +16,11 @@
       "description": "eslint 10 has no lockfile solution here: eslint-plugin-react 7.37.5 still peers eslint <=^9.7 and the Grafana scaffold pins ^9.32.0; lift once both support 10",
       "matchPackageNames": ["eslint"],
       "allowedVersions": "<10.0.0"
+    },
+    {
+      "description": "@grafana/data and @grafana/runtime 13.1.x peer react ^18.0.0 and react-dom ^18.0.0, so react 19 cannot resolve at all (npm ci fails with ERESOLVE); the @types move with the runtime packages so they do not drift ahead. Lift once the @grafana packages peer react 19",
+      "matchPackageNames": ["react", "react-dom", "@types/react", "@types/react-dom"],
+      "allowedVersions": "<19.0.0"
     }
   ]
 }
