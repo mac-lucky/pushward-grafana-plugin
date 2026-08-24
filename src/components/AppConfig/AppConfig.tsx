@@ -1,4 +1,4 @@
-import React, { ChangeEvent, FormEvent, useEffect, useState } from 'react';
+import React, { ChangeEvent, SubmitEvent, useEffect, useState } from 'react';
 import { lastValueFrom } from 'rxjs';
 import { css } from '@emotion/css';
 import {
@@ -256,7 +256,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     setState({ ...state, widgets, widgetsText: WIDGET_EXAMPLE, widgetsError: undefined, backendWidgetsError: undefined });
   };
 
-  const onSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const onSubmit = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (isSubmitDisabled) {
       return;
