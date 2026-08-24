@@ -30,9 +30,10 @@ jobs:
       - uses: grafana/plugin-actions/build-plugin@8b12a2d6fa5fc0939a6bf75905453d4b505ef29a # build-plugin/v1.2.0
         with:
           # build-plugin defaults to Node 20 and Go 1.25; match the CI build
-          # (Node 22). Go tracks the 1.26 line so a renovate bump of the go.mod
-          # directive cannot outrun a pinned patch toolchain again.
-          node-version: '22'
+          # (Node 24, per .node-version). Go tracks the 1.26 line so a renovate
+          # bump of the go.mod directive cannot outrun a pinned patch toolchain
+          # again.
+          node-version: '24'
           go-version: '1.26'
           # To sign for the catalog / Grafana Cloud, save the token in repository
           # secrets and uncomment (see the grafana.com plugin-tools signing docs):

@@ -16,9 +16,9 @@ jobs:
         with:
           node-version-file: .node-version
           cache: 'npm'
-      # Node 22's bundled npm (10.x) false-positives "package-lock.json out of
-      # sync" on this tree's optional peer deps; the pinned packageManager
-      # version doesn't, so activate it before npm ci.
+      # Activate the pinned packageManager npm (package.json) instead of the
+      # runner's bundled one, so npm ci resolves the lockfile the same way as
+      # local installs.
       - run: corepack enable npm
 
       - name: Install dependencies
