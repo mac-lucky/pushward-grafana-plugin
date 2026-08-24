@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+
+- Maintenance release: Grafana packages updated to 13.2.0 and the frontend moved to React 19. No functional changes; Grafana 12.3 or newer is still supported.
+
 ## 0.7.0
 
 - Two new widget templates. `trend` draws a sparkline from the plugin's own rolling buffer of the last 48 polls, so you get a chart without a range query; it appears after the second poll and takes optional `min_value` / `max_value` as chart bounds. `countdown` has no query at all - give it an `end_date` and the phone counts down on its own. Both need the PushWard iOS app 1.6.0 or newer. Update every device on the account first: an older app cannot decode the new templates, and one entry it cannot decode makes its entire widget list unavailable until the widget is deleted through the API.
