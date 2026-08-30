@@ -24,6 +24,26 @@ describe('templateMeta', () => {
     expect(templateMeta('schedule').label).toBe('Schedule');
     expect(templateMeta('flow').label).toBe('Flow');
   });
+
+  // The Activities table renders through this same map off a raw GET
+  // /activities, so every activity template needs a row or it shows as the raw
+  // id with the unknown-template icon.
+  it('labels the activity templates the Activities table lists', () => {
+    expect(templateMeta('generic').label).toBe('Generic');
+    expect(templateMeta('steps').label).toBe('Steps');
+    expect(templateMeta('alert').label).toBe('Alert');
+    expect(templateMeta('board').label).toBe('Board');
+    expect(templateMeta('log').label).toBe('Log');
+    expect(templateMeta('media').label).toBe('Media');
+  });
+
+  // 'apps' is the unknown-template fallback, so reusing it would make a known
+  // template indistinguishable from an unrecognised one.
+  it('does not reuse the unknown-template icon for a known template', () => {
+    for (const id of ['generic', 'steps', 'alert', 'board', 'log', 'media']) {
+      expect(templateMeta(id).icon).not.toBe('apps');
+    }
+  });
 });
 
 describe('creatableTemplates', () => {
@@ -44,7 +64,7 @@ describe('creatableTemplates', () => {
 
   it('excludes the templates the plugin cannot poll for', () => {
     const offered = creatableTemplates().map((o) => o.value);
-    for (const id of ['timeline', 'battery', 'schedule', 'flow']) {
+    for (const id of ['timeline', 'battery', 'schedule', 'flow', 'generic', 'steps', 'alert', 'board', 'log', 'media']) {
       expect(offered).not.toContain(id);
     }
   });

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0
+
+- The optional companion push notification now opens the timeline it belongs to instead of the app's inbox.
+- The Activities page shows all three activity states. A preempted activity - one iOS evicted to free a Live Activity slot, which the server promotes back automatically when a slot frees - used to render with a green "ongoing" badge; it is now orange with an explanation on hover, and it keeps its End and Silence actions, because it is still live.
+- `generic`, `steps`, `alert`, `board`, `log` and `media` activities are listed with proper names and icons in the Activities table now, instead of the raw template id. These come from outside the plugin - a Home Assistant card, a direct API call - which is why the plugin never had rows for them.
+
 ## 0.7.1
 
 - Maintenance release: Grafana packages updated to 13.2.0 and the frontend moved to React 19. No functional changes; Grafana 12.3 or newer is still supported.

@@ -520,10 +520,12 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 	content.Icon = resolvedIcon
 	content.AccentColor = pushward.ColorGreen
 
+	ended := true
 	if err := b.pwClient.UpdateActivity(ctx, slug, pushward.UpdateRequest{
 		State:   pushward.StateEnded,
 		Content: content,
 	}); err != nil {
+		ended = false
 		logger.Error("failed to end activity", "error", err)
 		b.recordError()
 		b.record(alertname, slug, "resolved", false, err.Error())
@@ -536,8 +538,16 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 	// Fire the passive "resolved" push regardless of the ended-update outcome: if
 	// that update failed the activity is still live on-device, which is exactly
 	// when the user most needs the resolved notification.
+	//
+	// Drop the deep link in that case, though: the likeliest reason the end
+	// update failed is that the activity is gone server-side, and a slug that
+	// does not resolve is a 422 that loses the whole notification.
 	if b.cfg.AlsoNotify {
-		b.sendAlertNotification(ctx, logger, a, slug, alertname, true)
+		linkSlug := slug
+		if !ended {
+			linkSlug = ""
+		}
+		b.sendAlertNotification(ctx, logger, a, linkSlug, alertname, true)
 	}
 }
 
@@ -691,6 +701,12 @@ func (b *Bridge) buildContent(a alert, severity string, values map[string]float6
 		content.PrimarySeries = v
 	}
 
+	// No url_action / secondary_url_action here. The server accepts them on every
+	// template, but the iOS timeline card is the one content view that does not
+	// render an action row - not on the Lock Screen, not in the expanded island -
+	// so they would ship as a feature that draws nothing. Adding the row to the
+	// timeline template in pushward-ios is the prerequisite.
+
 	return content
 }
 
@@ -701,7 +717,7 @@ func (b *Bridge) buildContent(a alert, severity string, values map[string]float6
 // resolved pushes; an empty level defaults to active so a zero-value Config
 // still alerts. The CollapseID keys per alertname so a firing push is replaced
 // by its resolved push rather than stacking.
-func buildAlertNotification(a alert, alertname string, resolved bool, level string) pushward.SendNotificationRequest {
+func buildAlertNotification(a alert, slug, alertname string, resolved bool, level string) pushward.SendNotificationRequest {
 	if level == "" {
 		level = pushward.LevelActive
 	}
@@ -719,6 +735,12 @@ func buildAlertNotification(a alert, alertname string, resolved bool, level stri
 		Source:     "grafana",
 		Level:      level,
 		Push:       pushward.BoolPtr(true),
+		// Deep-links the notification into the timeline activity it accompanies.
+		// A slug the caller does not own is rejected 422 BEFORE the notification
+		// is persisted, so an empty slug here is deliberate rather than a miss:
+		// callers pass "" whenever they cannot vouch for the activity still
+		// existing, and losing the link beats losing the notification.
+		ActivitySlug: slug,
 	}
 
 	summary := a.Annotations[annSummary]
@@ -745,7 +767,7 @@ func buildAlertNotification(a alert, alertname string, resolved bool, level stri
 // best-effort: a failure is logged and recorded on the /history surface but
 // never darkens the timeline path.
 func (b *Bridge) sendAlertNotification(ctx context.Context, logger *slog.Logger, a alert, slug, alertname string, resolved bool) {
-	req := buildAlertNotification(a, alertname, resolved, b.cfg.NotifyLevel)
+	req := buildAlertNotification(a, slug, alertname, resolved, b.cfg.NotifyLevel)
 	if err := b.pwClient.SendNotification(ctx, req); err != nil {
 		logger.Warn("failed to send alert notification", "resolved", resolved, "error", err)
 		b.recordError()
@@ -972,6 +994,10 @@ func (b *Bridge) endAlertActivity(ctx context.Context, alertname string, state *
 		Smoothing:   b.cfg.Smoothing,
 		Decimals:    b.cfg.Decimals,
 	}
+	// No link fields here: they are omitempty, so merge-patch preserves whatever
+	// the firing update stored (panel + rule). Re-sending only the rule link
+	// would overwrite the panel slot while the stored rule survives in the
+	// secondary, leaving two identical buttons.
 	if len(values) > 0 {
 		content.Value = any(values)
 	}

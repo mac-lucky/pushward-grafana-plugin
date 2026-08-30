@@ -18,6 +18,7 @@ import {
   Text,
   Tooltip,
   useStyles2,
+  type BadgeColor,
   type Column,
 } from '@grafana/ui';
 import {
@@ -38,6 +39,21 @@ import { TemplateCell } from '../components/ui/TemplateCell';
 import { testIds } from '../components/testIds';
 
 type Notice = { severity: 'success' | 'error'; title: string; detail?: string };
+
+// The server has three states, not two. `preempted` means the activity was
+// evicted to free one of iOS's five concurrent Live Activity slots; since server
+// 1.10.0 it is promoted back to ongoing automatically when a slot frees, so it
+// is a state users now actually see rather than a rare edge. An unrecognised
+// state is deliberately blue, not grey: a future state must not read as
+// "finished".
+const STATE_COLOR: Record<string, BadgeColor> = {
+  ongoing: 'green',
+  preempted: 'orange',
+  ended: 'darkgrey',
+};
+
+const PREEMPTED_HINT =
+  'Evicted to make room for a higher-priority activity. It is promoted back automatically when a slot frees.';
 
 const SILENCE_DURATIONS: Array<{ label: string; seconds: number }> = [
   { label: 'Silence 1 hour', seconds: 60 * 60 },
@@ -196,9 +212,11 @@ function Activities() {
       {
         id: 'state',
         header: 'State',
-        cell: ({ row: { original } }) => (
-          <Badge color={original.state === 'ended' ? 'darkgrey' : 'green'} text={original.state ?? 'unknown'} />
-        ),
+        cell: ({ row: { original } }) => {
+          const state = original.state ?? 'unknown';
+          const badge = <Badge color={STATE_COLOR[state] ?? 'blue'} text={state} />;
+          return state === 'preempted' ? <Tooltip content={PREEMPTED_HINT}>{badge}</Tooltip> : badge;
+        },
       },
       {
         id: 'template',
@@ -221,10 +239,13 @@ function Activities() {
         header: 'Actions',
         cell: ({ row: { original } }) => {
           const slug = original.slug ?? '';
-          const ended = original.state === 'ended';
           const busy = busySlug === slug;
           const matchers = matchersFor(activeBySlug.get(slug), original.name);
-          if (ended) {
+          // A preempted activity is still live server-side - the server permits
+          // PREEMPTED -> ENDED, the matching alert may still be firing, and
+          // ending it also drops it from the promotion pool - so it keeps both
+          // actions.
+          if (original.state === 'ended') {
             return <span className={s.muted}>—</span>;
           }
           return (

@@ -68,10 +68,12 @@ func (s *stubServer) find(method, path string) *recordedReq {
 	return nil
 }
 
-// newTestBridge builds a bridge whose PushWard client points at url. Metrics,
-// delivery log and Grafana resolver are nil (all nil-safe); the poller is real
-// but backed by a no-op querier so no metrics are queried.
-func newTestBridge(t *testing.T, url string, cfg Config) *Bridge {
+// newTestBridge builds a bridge whose PushWard client points at url and whose
+// Grafana resolver is resolver - nil for the tests that never look one up, which
+// is also the shape a Grafana instance without a configured datasource produces.
+// Metrics and the delivery log are nil too (all three are nil-safe); the poller
+// is real but backed by a no-op querier so no metrics are queried.
+func newTestBridge(t *testing.T, url string, resolver GrafanaResolver, cfg Config) *Bridge {
 	t.Helper()
 	pw := pushward.NewClient(url, "hlk_x")
 	poller := NewPoller(nopQuerier{}, pw, time.Hour)
@@ -80,11 +82,12 @@ func newTestBridge(t *testing.T, url string, cfg Config) *Bridge {
 		poller.Wait()
 	})
 	return &Bridge{
-		pwClient: pw,
-		poller:   poller,
-		active:   make(map[string]*alertState),
-		capDrops: syncx.NewDropCounter(100),
-		cfg:      cfg,
+		pwClient:      pw,
+		poller:        poller,
+		grafanaClient: resolver,
+		active:        make(map[string]*alertState),
+		capDrops:      syncx.NewDropCounter(100),
+		cfg:           cfg,
 	}
 }
 
@@ -99,7 +102,7 @@ func firingAlert() alert {
 
 func TestAlsoNotifyFiringSendsActiveNotification(t *testing.T) {
 	s := newStubServer(t)
-	b := newTestBridge(t, s.URL, Config{AlsoNotify: true, SeverityLabel: "severity", DefaultSeverity: "warning"})
+	b := newTestBridge(t, s.URL, nil, Config{AlsoNotify: true, SeverityLabel: "severity", DefaultSeverity: "warning"})
 
 	b.handleFiring(context.Background(), firingAlert())
 
@@ -122,11 +125,18 @@ func TestAlsoNotifyFiringSendsActiveNotification(t *testing.T) {
 	if sub, _ := notif.body["subtitle"].(string); !strings.HasPrefix(sub, "Grafana") {
 		t.Errorf("notification subtitle = %q, want it to start with Grafana", sub)
 	}
+	// Without this the companion push does not deep-link into the timeline
+	// activity it is about.
+	create := s.find(http.MethodPost, "/activities")
+	wantSlug, _ := create.body["slug"].(string)
+	if got, _ := notif.body["activity_slug"].(string); got == "" || got != wantSlug {
+		t.Errorf("notification activity_slug = %q, want the activity's slug %q", got, wantSlug)
+	}
 }
 
 func TestAlsoNotifyFiringUsesConfiguredLevel(t *testing.T) {
 	s := newStubServer(t)
-	b := newTestBridge(t, s.URL, Config{AlsoNotify: true, NotifyLevel: pushward.LevelCritical, SeverityLabel: "severity", DefaultSeverity: "warning"})
+	b := newTestBridge(t, s.URL, nil, Config{AlsoNotify: true, NotifyLevel: pushward.LevelCritical, SeverityLabel: "severity", DefaultSeverity: "warning"})
 
 	b.handleFiring(context.Background(), firingAlert())
 
@@ -141,7 +151,7 @@ func TestAlsoNotifyFiringUsesConfiguredLevel(t *testing.T) {
 
 func TestAlsoNotifyOffSendsNoNotification(t *testing.T) {
 	s := newStubServer(t)
-	b := newTestBridge(t, s.URL, Config{AlsoNotify: false, SeverityLabel: "severity", DefaultSeverity: "warning"})
+	b := newTestBridge(t, s.URL, nil, Config{AlsoNotify: false, SeverityLabel: "severity", DefaultSeverity: "warning"})
 
 	b.handleFiring(context.Background(), firingAlert())
 
@@ -166,7 +176,7 @@ func TestAlsoNotifyResolvedCarriesConfiguredLevel(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newStubServer(t)
-			b := newTestBridge(t, s.URL, Config{AlsoNotify: true, NotifyLevel: tc.cfgLevel, SeverityLabel: "severity", DefaultSeverity: "warning"})
+			b := newTestBridge(t, s.URL, nil, Config{AlsoNotify: true, NotifyLevel: tc.cfgLevel, SeverityLabel: "severity", DefaultSeverity: "warning"})
 
 			// Seed the alert as already tracked so handleResolved ends it.
 			const mapKey = "HighCPU"
@@ -260,7 +270,7 @@ func TestBuildAlertNotification(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := buildAlertNotification(tc.a, tc.alertname, tc.resolved, tc.level)
+			req := buildAlertNotification(tc.a, "grafana-test", tc.alertname, tc.resolved, tc.level)
 			if req.Title != tc.alertname {
 				t.Errorf("Title = %q, want %q", req.Title, tc.alertname)
 			}
@@ -287,8 +297,8 @@ func TestBuildAlertNotification(t *testing.T) {
 
 	t.Run("collapse id is stable across firing and resolved", func(t *testing.T) {
 		a := alert{Annotations: map[string]string{"summary": "x"}}
-		firing := buildAlertNotification(a, "HighCPU", false, pushward.LevelActive)
-		resolved := buildAlertNotification(a, "HighCPU", true, pushward.LevelActive)
+		firing := buildAlertNotification(a, "grafana-test", "HighCPU", false, pushward.LevelActive)
+		resolved := buildAlertNotification(a, "grafana-test", "HighCPU", true, pushward.LevelActive)
 		if firing.CollapseID != resolved.CollapseID {
 			t.Errorf("collapse ids differ (%q vs %q): the resolved push would stack instead of replacing the firing one",
 				firing.CollapseID, resolved.CollapseID)
@@ -303,7 +313,7 @@ func TestBuildAlertNotification(t *testing.T) {
 			Labels:      map[string]string{"instance": strings.Repeat("y", 200)},
 			Annotations: map[string]string{"summary": strings.Repeat("x", 500)},
 		}
-		req := buildAlertNotification(a, "HighCPU", false, pushward.LevelActive)
+		req := buildAlertNotification(a, "grafana-test", "HighCPU", false, pushward.LevelActive)
 		if n := utf8.RuneCountInString(req.Subtitle); n > maxNotifySubtitleRunes {
 			t.Errorf("Subtitle rune count = %d, want <= %d", n, maxNotifySubtitleRunes)
 		}
@@ -317,7 +327,7 @@ func TestBuildAlertNotification(t *testing.T) {
 // alert does not send another active push (the isNew gate).
 func TestAlsoNotifyFiringOnlyOncePerAlert(t *testing.T) {
 	s := newStubServer(t)
-	b := newTestBridge(t, s.URL, Config{AlsoNotify: true, SeverityLabel: "severity", DefaultSeverity: "warning"})
+	b := newTestBridge(t, s.URL, nil, Config{AlsoNotify: true, SeverityLabel: "severity", DefaultSeverity: "warning"})
 
 	b.active["HighCPU"] = &alertState{
 		slug:         makeSlug("HighCPU"),
@@ -343,7 +353,7 @@ func TestAlsoNotifyFailureDoesNotDarkTimeline(t *testing.T) {
 		}
 		return http.StatusOK
 	})
-	b := newTestBridge(t, s.URL, Config{AlsoNotify: true, SeverityLabel: "severity", DefaultSeverity: "warning"})
+	b := newTestBridge(t, s.URL, nil, Config{AlsoNotify: true, SeverityLabel: "severity", DefaultSeverity: "warning"})
 
 	a := firingAlert()
 	a.Values = map[string]float64{"A": 42} // gives the firing path a value so a timeline update is attempted
@@ -362,7 +372,7 @@ func TestAlsoNotifyFailureDoesNotDarkTimeline(t *testing.T) {
 // firing instances does not end the activity or send a resolved push.
 func TestAlsoNotifyPartialResolutionNoPush(t *testing.T) {
 	s := newStubServer(t)
-	b := newTestBridge(t, s.URL, Config{AlsoNotify: true, SeverityLabel: "severity", DefaultSeverity: "warning"})
+	b := newTestBridge(t, s.URL, nil, Config{AlsoNotify: true, SeverityLabel: "severity", DefaultSeverity: "warning"})
 
 	b.active["HighCPU"] = &alertState{
 		slug:         makeSlug("HighCPU"),
@@ -389,7 +399,7 @@ func TestAlsoNotifyPartialResolutionNoPush(t *testing.T) {
 // the resolve path: the activity still ends, but no notification is sent.
 func TestAlsoNotifyResolvedOffSendsNoNotification(t *testing.T) {
 	s := newStubServer(t)
-	b := newTestBridge(t, s.URL, Config{AlsoNotify: false, SeverityLabel: "severity", DefaultSeverity: "warning"})
+	b := newTestBridge(t, s.URL, nil, Config{AlsoNotify: false, SeverityLabel: "severity", DefaultSeverity: "warning"})
 
 	b.active["HighCPU"] = &alertState{
 		slug:         makeSlug("HighCPU"),
