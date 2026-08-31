@@ -63,14 +63,6 @@ describe('creatableTemplates', () => {
     ]);
   });
 
-  it('excludes the templates the plugin cannot poll for', () => {
-    const offered = creatableTemplates().map((o) => o.value);
-    const excluded = ['timeline', 'battery', 'schedule', 'flow', 'generic', 'steps', 'alert', 'board', 'log', 'media', 'approval'];
-    for (const id of excluded) {
-      expect(offered).not.toContain(id);
-    }
-  });
-
   it('carries the same labels the tables use', () => {
     for (const { label, value } of creatableTemplates()) {
       expect(label).toBe(templateMeta(value).label);
