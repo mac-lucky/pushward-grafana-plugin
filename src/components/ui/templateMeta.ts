@@ -8,10 +8,10 @@ export interface TemplateMeta {
    * Non-creatable entries still need a row: the Widgets table lists everything
    * on the account, so a widget made through the REST API or Home Assistant has
    * to read properly here even though this plugin could not have created it.
-   * `timeline`, `generic`, `steps`, `alert`, `board`, `log` and `media` are
-   * activity templates rather than widget ones; they are here because the
-   * Activities table renders through the same map. `gauge` and `countdown` are
-   * both.
+   * `timeline`, `generic`, `steps`, `alert`, `board`, `log`, `media` and
+   * `approval` are activity templates rather than widget ones; they are here
+   * because the Activities table renders through the same map. `gauge` and
+   * `countdown` are both.
    */
   creatable?: boolean;
 }
@@ -39,6 +39,7 @@ const META: Record<string, TemplateMeta> = {
   board: { icon: 'table', label: 'Board' },
   log: { icon: 'file-alt', label: 'Log' },
   media: { icon: 'play', label: 'Media' },
+  approval: { icon: 'question-circle', label: 'Approval' },
 };
 
 export function templateMeta(template?: string): TemplateMeta {

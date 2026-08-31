@@ -35,12 +35,13 @@ describe('templateMeta', () => {
     expect(templateMeta('board').label).toBe('Board');
     expect(templateMeta('log').label).toBe('Log');
     expect(templateMeta('media').label).toBe('Media');
+    expect(templateMeta('approval').label).toBe('Approval');
   });
 
   // 'apps' is the unknown-template fallback, so reusing it would make a known
   // template indistinguishable from an unrecognised one.
   it('does not reuse the unknown-template icon for a known template', () => {
-    for (const id of ['generic', 'steps', 'alert', 'board', 'log', 'media']) {
+    for (const id of ['generic', 'steps', 'alert', 'board', 'log', 'media', 'approval']) {
       expect(templateMeta(id).icon).not.toBe('apps');
     }
   });
@@ -64,7 +65,8 @@ describe('creatableTemplates', () => {
 
   it('excludes the templates the plugin cannot poll for', () => {
     const offered = creatableTemplates().map((o) => o.value);
-    for (const id of ['timeline', 'battery', 'schedule', 'flow', 'generic', 'steps', 'alert', 'board', 'log', 'media']) {
+    const excluded = ['timeline', 'battery', 'schedule', 'flow', 'generic', 'steps', 'alert', 'board', 'log', 'media', 'approval'];
+    for (const id of excluded) {
       expect(offered).not.toContain(id);
     }
   });
