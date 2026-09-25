@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1
+
+- Dependency updates only; nothing changes in how the plugin looks or behaves.
+
 ## 0.9.0
 
 - `approval` activities are listed with a proper name and icon in the Activities table now, instead of the raw template id. Like the templates added in 0.8.0, they come from outside the plugin - a direct API call, a Home Assistant card - and the plugin only lists them.
