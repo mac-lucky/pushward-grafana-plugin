@@ -10,6 +10,10 @@ on:
 # `pull requests: read and write`
 # `workflows: read and write`
 
+# The PAT above does the work; the job token only needs to read.
+permissions:
+  contents: read
+
 jobs:
   release:
     runs-on: ubuntu-latest
