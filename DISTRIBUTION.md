@@ -12,7 +12,7 @@ A release build is an unsigned ZIP (`pushward-alerts-app-<version>.zip`) attache
 unzip pushward-alerts-app-<version>.zip -d /var/lib/grafana/plugins/
 ```
 
-**Allow the unsigned plugin** — Grafana refuses to load unsigned plugins unless explicitly allowlisted:
+**Allow the unsigned plugin**: Grafana refuses to load unsigned plugins unless explicitly allowlisted:
 
 `grafana.ini`:
 ```ini
@@ -25,14 +25,14 @@ Docker / Kubernetes env var equivalent:
 GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=pushward-alerts-app
 ```
 
-Restart Grafana, then enable the app under **Administration → Plugins → PushWard → Enable**.
+Restart Grafana, then enable the app under **Administration > Plugins > PushWard > Enable**.
 
 > Unsigned plugins do **not** load on **Grafana Cloud**. Cloud requires the signed catalog build (track 2).
 
 ## 2. Official catalog / Community signature (later)
 
-1. Register a grafana.com org (the plugin id prefix — `pushward` — must match the org slug).
-2. Submit at grafana.com → My Plugins → Submit New Plugin (ZIP URL + source URL + SHA1). Grafana's Plugins team reviews (~2–6 weeks) and assigns a Community signature level.
+1. Register a grafana.com org (the plugin id prefix, `pushward`, must match the org slug).
+2. Submit at grafana.com > My Plugins > Submit New Plugin (ZIP URL + source URL + SHA1). Grafana's Plugins team reviews (~2-6 weeks) and assigns a Community signature level.
 3. Once approved, CI signs every release. The signed build installs via the catalog / `grafana-cli plugins install pushward-alerts-app` and loads on self-hosted **and** Cloud with no allowlist.
 
 **Enable signing in CI** (`.github/workflows/release.yml`):
