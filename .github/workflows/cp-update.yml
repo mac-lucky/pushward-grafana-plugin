@@ -5,12 +5,8 @@ on:
   schedule:
     - cron: '0 0 1 * *' # run once a month on the 1st day
 
-# To use this workflow please create a fine-grained personal access token for your repository with:
-# `contents: read and write`
-# `pull requests: read and write`
-# `workflows: read and write`
-
-# The PAT above does the work; the job token only needs to read.
+# A token of the mac-lucky-ci GitHub App does the work (contents, pull
+# requests and workflows: read and write); the job token only needs to read.
 permissions:
   contents: read
 
@@ -18,10 +14,20 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      - name: App token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          # The update can rewrite files under .github/workflows.
+          permission-workflows: write
+
       - uses: grafana/plugin-actions/create-plugin-update@b82357e85d512c678416146ca4e9f8672bd108da # create-plugin-update/v2.0.2
         with:
-          # Make sure to save the token in your repository secrets as `GH_PAT_TOKEN`
-          token: ${{ secrets.GH_PAT_TOKEN }}
+          token: ${{ steps.app.outputs.token }}
           # This repo's default branch is master; the action defaults base to main,
           # which makes its checkout fetch a nonexistent ref and fail.
           base: master
