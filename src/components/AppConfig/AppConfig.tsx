@@ -24,7 +24,7 @@ import {
   useStyles2,
   type ComboboxOption,
 } from '@grafana/ui';
-import { getConfig } from '../../api';
+import { errorMessage, getConfig } from '../../api';
 import { CONNECT_HREF } from '../../constants';
 import { testIds } from '../testIds';
 import { WidgetBuilder } from './WidgetBuilder';
@@ -53,6 +53,9 @@ export type AppPluginSettings = {
   decimals?: number;
   alsoNotify?: boolean;
   notifyLevel?: string;
+  ackEnabled?: boolean;
+  ackRepeatSeconds?: number;
+  ackExpireSeconds?: number;
   widgets?: WidgetConfig[];
 };
 
@@ -71,6 +74,9 @@ const DEFAULTS: Required<AppPluginSettings> = {
   decimals: 1,
   alsoNotify: false,
   notifyLevel: 'active',
+  ackEnabled: false,
+  ackRepeatSeconds: 300,
+  ackExpireSeconds: 3600,
   widgets: [],
 };
 
@@ -86,6 +92,23 @@ const NOTIFY_LEVEL_OPTIONS: Array<{ label: string; value: string }> = [
   { label: 'Normal', value: 'active' },
   { label: 'Critical', value: 'critical' },
 ];
+
+// checkE2EKey mirrors the backend's key parse closely enough to stop a save
+// that would leave every alert push content-free. Returns the key with
+// whitespace removed, or an error message.
+const checkE2EKey = (typed: string): { key: string; error?: string } => {
+  const key = typed.replace(/\s+/g, '');
+  if (/^hl[ka]_/i.test(key)) {
+    return {
+      key,
+      error: 'That is an integration key. Paste the encryption key from Settings > End-to-End Encryption in the PushWard app.',
+    };
+  }
+  if (!/^[0-9a-f]{64}$/i.test(key)) {
+    return { key, error: 'An encryption key is 64 hexadecimal characters.' };
+  }
+  return { key };
+};
 
 // Consistent field widths so the form columns line up: wider for free text,
 // narrower for numbers and durations.
@@ -130,6 +153,12 @@ type State = AppPluginSettings & {
   apiKey: string;
   isApiKeySet: boolean;
   isWebhookTokenSet: boolean;
+  // New end-to-end encryption key being entered (write-only, like apiKey).
+  e2eKey: string;
+  isE2EKeySet: boolean;
+  // The saved key's Key ID and the backend's parse error for it, from /config.
+  e2eKeyId?: string;
+  e2eKeyError?: string;
   // Widget definitions. The form builder edits `widgets` directly; the JSON
   // editor edits `widgetsText`. widgetsMode selects which is the source of truth
   // on submit; switching modes serialises/parses between the two.
@@ -165,9 +194,14 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     decimals: jsonData?.decimals ?? DEFAULTS.decimals,
     alsoNotify: jsonData?.alsoNotify ?? DEFAULTS.alsoNotify,
     notifyLevel: jsonData?.notifyLevel ?? DEFAULTS.notifyLevel,
+    ackEnabled: jsonData?.ackEnabled ?? DEFAULTS.ackEnabled,
+    ackRepeatSeconds: jsonData?.ackRepeatSeconds ?? DEFAULTS.ackRepeatSeconds,
+    ackExpireSeconds: jsonData?.ackExpireSeconds ?? DEFAULTS.ackExpireSeconds,
     apiKey: '',
     isApiKeySet: Boolean(secureJsonFields?.apiKey),
     isWebhookTokenSet: Boolean(secureJsonFields?.webhookToken),
+    e2eKey: '',
+    isE2EKeySet: Boolean(secureJsonFields?.e2eKey),
     widgets: jsonData?.widgets ?? [],
     widgetsMode: 'form',
     widgetsText: jsonData?.widgets?.length ? JSON.stringify(jsonData.widgets, null, 2) : '',
@@ -175,17 +209,28 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
   });
 
   const isSubmitDisabled = !state.apiUrl;
+  const isSilent = state.notifyLevel === 'passive';
 
   // Surface the backend's parse/validate result for the saved widget config, so
   // an error only the Go validator catches lands on the widgets editor here
-  // rather than being discovered later on the Overview page. Best-effort.
+  // rather than being discovered later on the Overview page. The saved
+  // encryption key's Key ID and parse error come from the same call.
+  // Best-effort.
   useEffect(() => {
     let active = true;
     getConfig()
       .then((cfg) => {
-        if (active && cfg.widgetsError) {
-          setState((prev) => ({ ...prev, backendWidgetsError: cfg.widgetsError }));
+        if (!active || !(cfg.widgetsError || cfg.e2eKeyId || cfg.e2eError)) {
+          return;
         }
+        setState((prev) => ({
+          ...prev,
+          backendWidgetsError: cfg.widgetsError || prev.backendWidgetsError,
+          e2eKeyId: cfg.e2eKeyId || undefined,
+          e2eKeyError: cfg.e2eError
+            ? `The saved key does not work, so alert pushes go out without their text: ${cfg.e2eError}`
+            : undefined,
+        }));
       })
       .catch(() => {
         /* non-fatal: the inline backend-error hint is best-effort */
@@ -199,12 +244,20 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     setState({ ...state, [event.target.name]: event.target.value });
   };
 
+  // Whole numbers only: the backend reads these into ints, and a decimal would
+  // fail the whole settings load.
   const onChangeNumber = (event: ChangeEvent<HTMLInputElement>) => {
-    const parsed = Number(event.target.value);
+    const parsed = Math.trunc(Number(event.target.value));
     setState({ ...state, [event.target.name]: Number.isNaN(parsed) ? 0 : parsed });
   };
 
   const onResetApiKey = () => setState({ ...state, apiKey: '', isApiKeySet: false });
+
+  const onChangeE2EKey = (event: ChangeEvent<HTMLInputElement>) =>
+    setState({ ...state, e2eKey: event.target.value, e2eKeyError: undefined });
+
+  const onResetE2EKey = () =>
+    setState({ ...state, e2eKey: '', isE2EKeySet: false, e2eKeyId: undefined, e2eKeyError: undefined });
 
   const onChangeWidgets = (event: ChangeEvent<HTMLTextAreaElement>) => {
     // Clear any stale parse error (client and backend) as the user edits.
@@ -278,6 +331,24 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
       widgets = state.widgets;
     }
 
+    // Grafana keeps every secure key a save leaves out, so send only the
+    // secrets the user typed, plus an empty value for one they reset, which
+    // removes it.
+    const secureJsonData: Record<string, string> = {};
+    if (state.apiKey !== '' || (secureJsonFields?.apiKey && !state.isApiKeySet)) {
+      secureJsonData.apiKey = state.apiKey;
+    }
+    if (state.e2eKey.trim() !== '') {
+      const { key, error } = checkE2EKey(state.e2eKey);
+      if (error) {
+        setState({ ...state, e2eKeyError: error });
+        return;
+      }
+      secureJsonData.e2eKey = key;
+    } else if (secureJsonFields?.e2eKey && !state.isE2EKeySet) {
+      secureJsonData.e2eKey = '';
+    }
+
     updatePluginAndReload(plugin.meta.id, {
       enabled,
       pinned,
@@ -296,11 +367,12 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         decimals: state.decimals,
         alsoNotify: state.alsoNotify,
         notifyLevel: state.notifyLevel,
+        ackEnabled: state.ackEnabled,
+        ackRepeatSeconds: state.ackRepeatSeconds,
+        ackExpireSeconds: state.ackExpireSeconds,
         widgets,
       },
-      // Only send the secret when the user typed a new one - never overwrite a
-      // previously-stored key with an empty value.
-      secureJsonData: state.isApiKeySet ? undefined : { apiKey: state.apiKey },
+      secureJsonData: Object.keys(secureJsonData).length > 0 ? secureJsonData : undefined,
     });
   };
 
@@ -329,6 +401,39 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
             placeholder="hlk_…"
             onChange={onChangeText}
             onReset={onResetApiKey}
+          />
+        </Field>
+
+        <Field
+          label="End-to-end encryption key"
+          description={
+            <>
+              Optional. Encrypts the title, subtitle and body of the push notifications this plugin sends, so only your
+              devices holding the key can read them; a device without it, or on a PushWard app older than 1.17, shows a
+              placeholder. Create it in the PushWard app under Settings &gt; End-to-End Encryption. Live Activities are
+              not encrypted, and an organization&apos;s integration key cannot send encrypted notifications.
+              {state.isE2EKeySet && state.e2eKeyId && (
+                <>
+                  {' '}
+                  Key ID in use: <code data-testid={testIds.appConfig.e2eKeyId}>{state.e2eKeyId}</code> (the app shows
+                  the same Key ID next to the key).
+                </>
+              )}
+            </>
+          }
+          invalid={Boolean(state.e2eKeyError)}
+          error={state.e2eKeyError}
+        >
+          <SecretInput
+            width={TEXT_WIDTH}
+            id="config-e2e-key"
+            data-testid={testIds.appConfig.e2eKey}
+            name="e2eKey"
+            value={state.e2eKey}
+            isConfigured={state.isE2EKeySet}
+            placeholder="64 hexadecimal characters"
+            onChange={onChangeE2EKey}
+            onReset={onResetE2EKey}
           />
         </Field>
 
@@ -435,17 +540,72 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         </Field>
 
         {state.alsoNotify && (
-          <Field
-            label="Notification priority"
-            description="How intrusive the push is (fire and resolve both use this). Silent: quiet, Lock Screen only. Normal: alerts as usual. Critical: breaks through Focus / silent mode (needs the critical-alert entitlement on your PushWard account, otherwise delivered as time-sensitive)."
-          >
-            <RadioButtonGroup
-              data-testid={testIds.appConfig.notifyLevel}
-              options={NOTIFY_LEVEL_OPTIONS}
-              value={state.notifyLevel}
-              onChange={(v) => setState({ ...state, notifyLevel: v ?? DEFAULTS.notifyLevel })}
-            />
-          </Field>
+          <>
+            <Field
+              label="Notification priority"
+              description="How intrusive the push is (fire and resolve both use this). Silent: quiet, Lock Screen only. Normal: alerts as usual. Critical: breaks through Focus / silent mode (needs the critical-alert entitlement on your PushWard account, otherwise delivered as time-sensitive)."
+            >
+              <RadioButtonGroup
+                data-testid={testIds.appConfig.notifyLevel}
+                options={NOTIFY_LEVEL_OPTIONS}
+                value={state.notifyLevel}
+                onChange={(v) => setState({ ...state, notifyLevel: v ?? DEFAULTS.notifyLevel })}
+              />
+            </Field>
+
+            <Field
+              label="Repeat until acknowledged"
+              description={
+                isSilent
+                  ? 'Not available at Silent priority: a silent push never alerts, so there is nothing to acknowledge.'
+                  : 'Repeat the firing push until someone taps Acknowledge on a device, or until it stops on its own. Resolving the alert stops the repeats. At most 25 notifications can repeat at once per account; past that the alert is sent once without repeating.'
+              }
+              disabled={isSilent}
+            >
+              <Switch
+                data-testid={testIds.appConfig.ackEnabled}
+                value={state.ackEnabled}
+                disabled={isSilent}
+                onChange={(e) => setState({ ...state, ackEnabled: e.currentTarget.checked })}
+              />
+            </Field>
+
+            {state.ackEnabled && (
+              <>
+                <Field label="Repeat every" description="Seconds between repeats, 30 to 3600." disabled={isSilent}>
+                  <Input
+                    width={NUM_WIDTH}
+                    type="number"
+                    min={30}
+                    max={3600}
+                    name="ackRepeatSeconds"
+                    data-testid={testIds.appConfig.ackRepeat}
+                    value={state.ackRepeatSeconds}
+                    disabled={isSilent}
+                    onChange={onChangeNumber}
+                  />
+                </Field>
+
+                <Field
+                  label="Stop repeating after"
+                  description="Seconds after which an unacknowledged push stops repeating, 60 to 10800 (3 hours)."
+                  disabled={isSilent}
+                >
+                  <Input
+                    width={NUM_WIDTH}
+                    type="number"
+                    min={60}
+                    max={10800}
+                    name="ackExpireSeconds"
+                    data-testid={testIds.appConfig.ackExpire}
+                    value={state.ackExpireSeconds}
+                    disabled={isSilent}
+                    onChange={onChangeNumber}
+                  />
+                </Field>
+              </>
+            )}
+          </>
         )}
 
         <ControlledCollapse label="Advanced timeline options" isOpen={false}>
@@ -604,7 +764,8 @@ const updatePluginAndReload = async (pluginId: string, data: Partial<PluginMeta<
     // Reload so the new settings propagate to the running plugin instance.
     window.location.reload();
   } catch (e) {
-    console.error('Error while updating the plugin', e);
+    // The error carries the request, secrets included, so log only what failed.
+    console.error('Error while updating the plugin', (e as { status?: number })?.status, errorMessage(e));
   }
 };
 

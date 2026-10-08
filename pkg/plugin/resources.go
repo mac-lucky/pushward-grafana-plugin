@@ -102,11 +102,9 @@ func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	// Benign widget setup states (no datasource/key yet, engine starting) ride in
 	// the message text; only a genuine parse/validate failure populates the
 	// dedicated widgetsError field that the UI renders as a configuration error.
+	// An invalid encryption key rides only in e2eError, the same way.
 	if a.settings.WidgetsError == "" && widgetsMsg != "" {
 		msg += " | Widgets: " + widgetsMsg
-	}
-	if a.settings.E2EError != "" {
-		msg += " | Encryption key invalid, alert pushes are sent without the alert text: " + a.settings.E2EError
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

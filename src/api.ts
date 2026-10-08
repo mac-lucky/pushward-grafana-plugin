@@ -42,6 +42,9 @@ export interface HealthzResponse {
   widgets: boolean;
   // Non-empty when the widget JSON failed to parse/validate.
   widgetsError: string;
+  // Non-empty when the saved encryption key does not parse (alert pushes go
+  // out without their text until it is fixed).
+  e2eError: string;
   message: string;
 }
 
@@ -64,6 +67,11 @@ export interface ConfigResponse {
   // Number of configured widgets; widgetsError is non-empty if their JSON is invalid.
   widgetCount: number;
   widgetsError: string;
+  // Key ID of the saved end-to-end encryption key ('' when none is set), and
+  // the parse error when the saved key is invalid. The key itself is never
+  // returned.
+  e2eKeyId: string;
+  e2eError: string;
 }
 
 export interface TestResponse {

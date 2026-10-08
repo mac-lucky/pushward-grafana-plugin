@@ -178,6 +178,12 @@ function Overview() {
                     {state.health.widgetsError}
                   </Alert>
                 )}
+                {state.health.e2eError && (
+                  <Alert severity="warning" title="Encryption key invalid">
+                    Alert push notifications are sent without the alert text until the key is fixed on the Configuration
+                    page: {state.health.e2eError}
+                  </Alert>
+                )}
                 {state.health.message && <p className={s.muted}>{state.health.message}</p>}
               </>
             )}

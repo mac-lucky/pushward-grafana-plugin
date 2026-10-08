@@ -2,6 +2,8 @@ export const testIds = {
   appConfig: {
     container: 'data-testid ac-container',
     apiKey: 'data-testid ac-api-key',
+    e2eKey: 'data-testid ac-e2e-key',
+    e2eKeyId: 'data-testid ac-e2e-key-id',
     apiUrl: 'data-testid ac-api-url',
     datasource: 'data-testid ac-datasource',
     severityLabel: 'data-testid ac-severity-label',
@@ -16,6 +18,9 @@ export const testIds = {
     decimals: 'data-testid ac-decimals',
     alsoNotify: 'data-testid ac-also-notify',
     notifyLevel: 'data-testid ac-notify-level',
+    ackEnabled: 'data-testid ac-ack-enabled',
+    ackRepeat: 'data-testid ac-ack-repeat',
+    ackExpire: 'data-testid ac-ack-expire',
     widgets: 'data-testid ac-widgets',
     widgetsExample: 'data-testid ac-widgets-example',
     submit: 'data-testid ac-submit-form',
