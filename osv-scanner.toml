@@ -1,0 +1,6 @@
+# braces is pulled in only by eslint-webpack-plugin (micromatch) at build
+# time and is not part of the plugin bundle. No fixed release exists yet;
+# drop this entry once braces publishes one.
+[[IgnoredVulns]]
+id = "GHSA-vfj7-8cjw-p6xm"
+reason = "Build-time only dependency (eslint-webpack-plugin -> micromatch), no fixed release"

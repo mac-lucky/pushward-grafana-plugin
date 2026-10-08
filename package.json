@@ -80,6 +80,7 @@
   },
   "packageManager": "npm@12.2.0",
   "overrides": {
-    "dompurify": "^3.4.12"
+    "dompurify": "^3.4.12",
+    "basic-ftp": "^6.2.2"
   }
 }
