@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.1
+
+- With an organization's integration key and an encryption key both set, alert push notifications were dropped, because PushWard cannot encrypt for organizations. They now arrive without the alert text, saying "Encryption is not available for organization keys", the same way an invalid key is handled. The test notification on the Connect page reports the problem rather than sending a placeholder. Remove the encryption key, or switch to a personal integration key, to get the full text back.
+
 ## 0.10.0
 
 - The alert push can repeat until someone acknowledges it. Turn on **Repeat until acknowledged** under the push notification settings and the firing push comes back every 5 minutes until you tap Acknowledge on any of your devices, for an hour at most. Both are adjustable: 30 seconds to an hour between repeats, up to 3 hours in total. Resolving the alert, or ending its activity from the Activities page, stops the repeats before the resolved push arrives. Turning the switch off does not stop repeats already running; they stop on Acknowledge or when they expire. Not available with Silent priority. PushWard allows 25 repeating notifications per account at once; past that the alert is still sent, just once.
