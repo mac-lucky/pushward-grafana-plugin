@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.0
+
+- The alert push can repeat until someone acknowledges it. Turn on **Repeat until acknowledged** under the push notification settings and the firing push comes back every 5 minutes until you tap Acknowledge on any of your devices, for an hour at most. Both are adjustable: 30 seconds to an hour between repeats, up to 3 hours in total. Resolving the alert, or ending its activity from the Activities page, stops the repeats before the resolved push arrives. Turning the switch off does not stop repeats already running; they stop on Acknowledge or when they expire. Not available with Silent priority. PushWard allows 25 repeating notifications per account at once; past that the alert is still sent, just once.
+- End-to-end encryption for the push notifications. Paste the key from Settings > End-to-End Encryption in the PushWard app and the plugin encrypts the title, subtitle and body of every push it sends; the Configuration page shows the Key ID so you can check it matches the app. Devices need PushWard 1.17 or newer and the same key, otherwise they show a placeholder. The timeline Live Activity is not encrypted. If the saved key turns out to be invalid, alerts still arrive but without their text, and the Overview and Configuration pages say what is wrong.
+- The test notification on the Connect page is encrypted when a key is set and names the Key ID it used.
+
 ## 0.9.1
 
 - Dependency updates only; nothing changes in how the plugin looks or behaves.
