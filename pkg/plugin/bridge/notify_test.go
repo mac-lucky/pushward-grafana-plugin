@@ -934,3 +934,173 @@ func TestAckCanceledWhenResolveOvertakesFiringPush(t *testing.T) {
 		t.Error("the repeats of the late firing push were never stopped")
 	}
 }
+
+// problemServer answers POST /notifications with whatever answer returns for
+// the decoded body, as a Problem when the status is an error, and keeps every
+// body it got. Everything else gets a 200.
+func problemServer(t *testing.T, answer func(body map[string]any) (int, string)) (url string, sent func() []string) {
+	t.Helper()
+	var (
+		mu     sync.Mutex
+		bodies []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if r.Method != http.MethodPost || r.URL.Path != "/notifications" {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		mu.Lock()
+		bodies = append(bodies, string(raw))
+		mu.Unlock()
+		var body map[string]any
+		_ = json.Unmarshal(raw, &body)
+		status, code := answer(body)
+		if status >= 400 {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": status, "code": code, "detail": "refused"})
+			return
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"id":1,"pushed":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), bodies...)
+	}
+}
+
+func TestOrgKeySendsContentFreeAlert(t *testing.T) {
+	// An organization key gets 422 for every encrypted send.
+	orgKey := func(body map[string]any) (int, string) {
+		if _, ok := body["encrypted"]; ok {
+			return http.StatusUnprocessableEntity, pushward.ErrCodeNotificationEncryptionUnavailable
+		}
+		return http.StatusCreated, ""
+	}
+	for _, resolved := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resolved=%v", resolved), func(t *testing.T) {
+			url, sent := problemServer(t, orgKey)
+			cfg := ackConfig()
+			cfg.E2EKey = mustKey(t)
+			b := newTestBridge(t, url, nil, cfg)
+			dl := &recLog{}
+			b.deliveryLog = dl
+			slug := makeSlug("HighCPU")
+			a := firingAlert()
+			if resolved {
+				a = resolvedAlert()
+			}
+
+			b.sendAlertNotification(context.Background(), slog.Default(), a, slug, slug, "HighCPU", resolved)
+
+			bodies := sent()
+			if len(bodies) != 2 {
+				t.Fatalf("got %d sends, want the encrypted one plus a content-free resend", len(bodies))
+			}
+			var second map[string]any
+			if err := json.Unmarshal([]byte(bodies[1]), &second); err != nil {
+				t.Fatal(err)
+			}
+			wantTitle := contentFreeFiring
+			if resolved {
+				wantTitle = contentFreeResolved
+			}
+			if second["title"] != wantTitle || second["body"] != contentFreeOrgBody {
+				t.Errorf("resend title/body = %v / %v, want %q / %q", second["title"], second["body"], wantTitle, contentFreeOrgBody)
+			}
+			if _, ok := second["encrypted"]; ok {
+				t.Error("the resend still carries the envelope")
+			}
+			if _, ok := second["acknowledge"]; ok == resolved {
+				t.Errorf("resend acknowledge present = %v, want %v (firing only)", ok, !resolved)
+			}
+			if tags, _ := second["tags"].([]any); !resolved && (len(tags) != 1 || tags[0] != slug) {
+				t.Errorf("resend tags = %v, want [%s] so the resolve can still cancel it", second["tags"], slug)
+			}
+			for _, s := range []string{"HighCPU", "node-1", "CPU"} {
+				if strings.Contains(bodies[1], s) {
+					t.Errorf("content-free resend contains %q: %s", s, bodies[1])
+				}
+			}
+			e := dl.find("notified")
+			if e == nil || !e.ok || !strings.Contains(e.detail, "organization keys") {
+				t.Errorf("delivery log notified = %+v, want ok noting organization keys", e)
+			}
+			if f := dl.find("notify"); f != nil {
+				t.Errorf("delivery log recorded a failure %+v, want the alert delivered", f)
+			}
+		})
+	}
+
+	// Only the organization refusal earns the content-free resend; any other
+	// failure of the sealed send is a failed notify, as before.
+	for _, tc := range []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{"server error", http.StatusInternalServerError, ""},
+		{"other 422", http.StatusUnprocessableEntity, pushward.ErrCodeNotificationActivityNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			url, sent := problemServer(t, func(map[string]any) (int, string) { return tc.status, tc.code })
+			cfg := ackConfig()
+			cfg.E2EKey = mustKey(t)
+			b := newTestBridge(t, url, nil, cfg)
+			// No retries, so a 5xx is one request too.
+			b.pwClient = pushward.NewClient(url, "hlk_x", pushward.WithRetryBudget(time.Nanosecond))
+			dl := &recLog{}
+			b.deliveryLog = dl
+			slug := makeSlug("HighCPU")
+
+			b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false)
+
+			if bodies := sent(); len(bodies) != 1 {
+				t.Fatalf("got %d sends, want only the sealed one: %v", len(bodies), bodies)
+			}
+			if e := dl.find("notify"); e == nil || e.ok {
+				t.Errorf("delivery log notify = %+v, want a recorded failure", e)
+			}
+			if e := dl.find("notified"); e != nil {
+				t.Errorf("delivery log notified = %+v, want none", e)
+			}
+		})
+	}
+
+	t.Run("content-free resend keeps the acknowledge rules", func(t *testing.T) {
+		// Encrypted sends are refused for the organization, then the
+		// acknowledged content-free one for the receipt cap.
+		url, sent := problemServer(t, func(body map[string]any) (int, string) {
+			if _, ok := body["encrypted"]; ok {
+				return http.StatusUnprocessableEntity, pushward.ErrCodeNotificationEncryptionUnavailable
+			}
+			if _, ok := body["acknowledge"]; ok {
+				return http.StatusConflict, pushward.ErrCodeNotificationReceiptLimit
+			}
+			return http.StatusCreated, ""
+		})
+		cfg := ackConfig()
+		cfg.E2EKey = mustKey(t)
+		b := newTestBridge(t, url, nil, cfg)
+		dl := &recLog{}
+		b.deliveryLog = dl
+		slug := makeSlug("HighCPU")
+
+		b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false)
+
+		bodies := sent()
+		if len(bodies) != 3 {
+			t.Fatalf("got %d sends, want encrypted, content-free with ack, content-free without", len(bodies))
+		}
+		if strings.Contains(bodies[2], "acknowledge") || strings.Contains(bodies[2], "HighCPU") {
+			t.Errorf("last send = %s, want content-free without acknowledge", bodies[2])
+		}
+		if e := dl.find("notified"); e == nil || !strings.Contains(e.detail, "ack refused") {
+			t.Errorf("delivery log notified = %+v, want ack refused noted", e)
+		}
+	})
+}

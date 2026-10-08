@@ -65,6 +65,7 @@ const (
 	contentFreeFiring   = "Grafana alert firing"
 	contentFreeResolved = "Grafana alert resolved"
 	contentFreeBody     = "Encryption key invalid, check the PushWard plugin settings"
+	contentFreeOrgBody  = "Encryption is not available for organization keys, check the PushWard plugin settings"
 )
 
 // GrafanaResolver resolves a Grafana alert rule's PromQL and reports firing
@@ -816,14 +817,14 @@ func buildAlertNotification(a alert, slug, alertname string, resolved bool, leve
 // carries it so the resolve can stop the repeats without any stored state.
 func (b *Bridge) sendAlertNotification(ctx context.Context, logger *slog.Logger, a alert, slug, tag, alertname string, resolved bool) {
 	req := buildAlertNotification(a, slug, alertname, resolved, b.cfg.NotifyLevel)
-	detail := []string{req.Level}
 
-	ack := !resolved && b.ackEnabled()
-	if ack {
+	if !resolved && b.ackEnabled() {
 		req.Acknowledge = &pushward.NotificationAcknowledge{RepeatSeconds: b.cfg.AckRepeat, ExpireSeconds: b.cfg.AckExpire}
 		req.Tags = []string{tag}
 	}
 
+	// textNote says what happened to the alert text, for the delivery log.
+	var textNote string
 	sealed, err := SealNotification(b.cfg.E2EKey, b.cfg.E2EKeyError, &req)
 	switch {
 	case err != nil:
@@ -831,38 +832,57 @@ func (b *Bridge) sendAlertNotification(ctx context.Context, logger *slog.Logger,
 		// never drop it either: the push still alerts, it just says nothing
 		// about the alert until the key is fixed.
 		logger.Error("cannot encrypt alert notification, sending it without the alert text", "error", err)
-		contentFree(&req, resolved)
-		detail = append(detail, "content-free: "+err.Error())
+		contentFree(&req, resolved, contentFreeBody)
+		textNote = "content-free: " + err.Error()
 	case sealed:
-		detail = append(detail, "encrypted")
+		textNote = "encrypted"
 	}
 
-	err = b.pwClient.SendNotification(ctx, req)
-	if ack {
-		if reason := ackRefusal(err); reason != "" {
-			// Losing the repeat beats losing the alert: send it once more as
-			// a plain push.
-			logger.Warn("acknowledge refused, sending the alert without it", "reason", reason, "error", err)
-			req.Acknowledge, req.Tags = nil, nil
-			err = b.pwClient.SendNotification(ctx, req)
-			detail = append(detail, "ack refused: "+reason)
-		} else if err == nil {
-			detail = append(detail, "ack")
-		}
+	ackNote, err := b.send(ctx, logger, &req)
+	var he *pushward.HTTPError
+	if sealed && errors.As(err, &he) && he.Code == pushward.ErrCodeNotificationEncryptionUnavailable {
+		// The key belongs to an organization, which cannot send encrypted.
+		// Same rule as an invalid key: the alert still goes out, without
+		// its text.
+		logger.Error("organization keys cannot send encrypted notifications, sending the alert without its text: remove the encryption key in the PushWard plugin settings or use a personal integration key", "error", err)
+		contentFree(&req, resolved, contentFreeOrgBody)
+		textNote = "content-free: encryption is not available for organization keys"
+		ackNote, err = b.send(ctx, logger, &req)
 	}
 	if err != nil {
-		var he *pushward.HTTPError
-		if errors.As(err, &he) && he.Code == pushward.ErrCodeNotificationEncryptionUnavailable {
-			logger.Error("organization keys cannot send encrypted notifications: remove the encryption key in the PushWard plugin settings or use a personal integration key", "error", err)
-		} else {
-			logger.Warn("failed to send alert notification", "resolved", resolved, "error", err)
-		}
+		logger.Warn("failed to send alert notification", "resolved", resolved, "error", err)
 		b.recordError()
 		b.record(alertname, slug, "notify", false, err.Error())
 		return
 	}
+	detail := []string{req.Level}
+	for _, d := range []string{textNote, ackNote} {
+		if d != "" {
+			detail = append(detail, d)
+		}
+	}
 	b.recordPushSent()
 	b.record(alertname, slug, "notified", true, strings.Join(detail, ", "))
+}
+
+// send posts req. When the server refuses only its acknowledge, it sends req
+// once more without it, dropping Acknowledge and Tags from req: losing the
+// repeat beats losing the alert. note says how the acknowledge fared, for the
+// delivery log.
+func (b *Bridge) send(ctx context.Context, logger *slog.Logger, req *pushward.SendNotificationRequest) (note string, err error) {
+	err = b.pwClient.SendNotification(ctx, *req)
+	if req.Acknowledge == nil {
+		return "", err
+	}
+	if reason := ackRefusal(err); reason != "" {
+		logger.Warn("acknowledge refused, sending the alert without it", "reason", reason, "error", err)
+		req.Acknowledge, req.Tags = nil, nil
+		return "ack refused: " + reason, b.pwClient.SendNotification(ctx, *req)
+	}
+	if err != nil {
+		return "", err
+	}
+	return "ack", nil
 }
 
 // ackEnabled reports whether firing pushes are sent with acknowledge.
@@ -939,16 +959,15 @@ func SealNotification(k *e2e.Key, keyErr string, req *pushward.SendNotificationR
 	return true, nil
 }
 
-// contentFree replaces the alert text of req with a fixed notice. What stays
-// is the metadata a sealed push carries readable anyway (level, thread and
-// collapse ids, deep link, acknowledge).
-func contentFree(req *pushward.SendNotificationRequest, resolved bool) {
+// contentFree replaces the alert text of req, sealed or not, with a fixed
+// notice whose body is body. What stays is the metadata a sealed push carries
+// readable anyway (level, thread and collapse ids, deep link, acknowledge).
+func contentFree(req *pushward.SendNotificationRequest, resolved bool, body string) {
 	req.Title = contentFreeFiring
 	if resolved {
 		req.Title = contentFreeResolved
 	}
-	req.Subtitle = ""
-	req.Body = contentFreeBody
+	req.Subtitle, req.Body, req.URL, req.Encrypted = "", body, "", ""
 }
 
 // ruleUIDFor extracts the Grafana alert-rule UID from an alert's generatorURL,

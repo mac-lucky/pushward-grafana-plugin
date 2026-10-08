@@ -14,6 +14,7 @@ import (
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/mac-lucky/pushward-integrations/shared/e2e"
+	"github.com/mac-lucky/pushward-integrations/shared/pushward"
 )
 
 const testAPIKey = "hlk_testkey0000000000000000000000000"
@@ -35,13 +36,14 @@ func (s *mockCallResourceResponseSender) Send(response *backend.CallResourceResp
 // app and the stub's base URL.
 func newTestApp(t *testing.T) (*App, string) {
 	t.Helper()
-	app, url, _ := newTestAppWith(t, nil)
+	app, url, _ := newTestAppWith(t, nil, nil)
 	return app, url
 }
 
 // newTestAppWith is newTestApp with extra secure settings. Its stub also
-// accepts POST /notifications and keeps their bodies, returned by the func.
-func newTestAppWith(t *testing.T, secure map[string]string) (*App, string, func() []string) {
+// accepts POST /notifications and keeps their bodies, returned by the func;
+// refuse, when set, picks a body to answer 422 with that Problem code.
+func newTestAppWith(t *testing.T, secure map[string]string, refuse func(body string) string) (*App, string, func() []string) {
 	t.Helper()
 	var (
 		mu     sync.Mutex
@@ -59,6 +61,14 @@ func newTestAppWith(t *testing.T, secure map[string]string) (*App, string, func(
 			mu.Lock()
 			notifs = append(notifs, string(body))
 			mu.Unlock()
+			if refuse != nil {
+				if code := refuse(string(body)); code != "" {
+					w.Header().Set("Content-Type", "application/problem+json")
+					w.WriteHeader(http.StatusUnprocessableEntity)
+					_, _ = fmt.Fprintf(w, `{"status":422,"code":%q,"detail":"refused"}`, code)
+					return
+				}
+			}
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"id":1,"pushed":true}`))
 			return
@@ -179,7 +189,7 @@ func TestConfigResourceE2EKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app, _, _ := newTestAppWith(t, map[string]string{"e2eKey": testE2EKey})
+	app, _, _ := newTestAppWith(t, map[string]string{"e2eKey": testE2EKey}, nil)
 	resp := callResource(t, app, http.MethodGet, "config")
 	var body map[string]any
 	if err := json.Unmarshal(resp.Body, &body); err != nil {
@@ -193,7 +203,7 @@ func TestConfigResourceE2EKey(t *testing.T) {
 	}
 
 	const bad = "0123456789abcdef"
-	app, _, _ = newTestAppWith(t, map[string]string{"e2eKey": bad})
+	app, _, _ = newTestAppWith(t, map[string]string{"e2eKey": bad}, nil)
 	for _, path := range []string{"config", "healthz"} {
 		resp = callResource(t, app, http.MethodGet, path)
 		var body map[string]any
@@ -214,7 +224,7 @@ func TestTestNotificationIsSealed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, _, sent := newTestAppWith(t, map[string]string{"e2eKey": testE2EKey})
+	app, _, sent := newTestAppWith(t, map[string]string{"e2eKey": testE2EKey}, nil)
 	resp := callResourceBody(t, app, http.MethodPost, "test", []byte(`{"kind":"notification"}`))
 	if resp.Status != http.StatusOK {
 		t.Fatalf("test status = %d (%s), want 200", resp.Status, resp.Body)
@@ -241,7 +251,7 @@ func TestTestNotificationIsSealed(t *testing.T) {
 	}
 
 	// An invalid key fails the test rather than sending anything.
-	app, _, sent = newTestAppWith(t, map[string]string{"e2eKey": "nope"})
+	app, _, sent = newTestAppWith(t, map[string]string{"e2eKey": "nope"}, nil)
 	resp = callResourceBody(t, app, http.MethodPost, "test", []byte(`{"kind":"notification"}`))
 	if resp.Status != http.StatusBadRequest || !strings.Contains(string(resp.Body), "encryption key invalid") {
 		t.Errorf("test with an invalid key = %d %s, want 400 naming the key", resp.Status, resp.Body)
@@ -284,5 +294,23 @@ func TestUnknownResource404(t *testing.T) {
 	resp := callResource(t, app, http.MethodGet, "not_found")
 	if resp.Status != http.StatusNotFound {
 		t.Errorf("unknown resource status = %d, want 404", resp.Status)
+	}
+}
+
+func TestTestNotificationOrgKey(t *testing.T) {
+	encrypted := func(body string) string {
+		if strings.Contains(body, `"encrypted"`) {
+			return pushward.ErrCodeNotificationEncryptionUnavailable
+		}
+		return ""
+	}
+	app, _, sent := newTestAppWith(t, map[string]string{"e2eKey": testE2EKey}, encrypted)
+	resp := callResourceBody(t, app, http.MethodPost, "test", []byte(`{"kind":"notification"}`))
+	if resp.Status != http.StatusBadRequest || !strings.Contains(string(resp.Body), "organization") {
+		t.Errorf("test with an organization key = %d %s, want 400 naming organization keys", resp.Status, resp.Body)
+	}
+	// The test reports the problem; it does not fall back to a content-free send.
+	if n := len(sent()); n != 1 {
+		t.Errorf("got %d sends, want only the refused encrypted one", n)
 	}
 }

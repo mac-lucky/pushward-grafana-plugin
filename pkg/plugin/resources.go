@@ -261,9 +261,11 @@ func (a *App) handleTest(w http.ResponseWriter, r *http.Request) {
 			msg = "Encrypted test notification sent with Key ID " + a.settings.E2EKey.KID() + ". Check your iPhone."
 		}
 	}
+	// Unlike an alert push, the test does not fall back to a content-free
+	// send: its job is to show what is wrong with the setup.
 	var he *pushward.HTTPError
 	if errors.As(err, &he) && he.Code == pushward.ErrCodeNotificationEncryptionUnavailable {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "message": "Organization keys cannot send encrypted notifications. Remove the encryption key or use a personal integration key."})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "This integration key belongs to an organization, and organization keys cannot send encrypted notifications. Remove the encryption key, or use a personal integration key. Until then alert pushes arrive without their text."})
 		return
 	}
 	if err != nil {
