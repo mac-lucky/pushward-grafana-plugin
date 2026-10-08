@@ -4,11 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
+	"github.com/mac-lucky/pushward-integrations/shared/e2e"
 )
 
 const testAPIKey = "hlk_testkey0000000000000000000000000"
@@ -30,11 +35,32 @@ func (s *mockCallResourceResponseSender) Send(response *backend.CallResourceResp
 // app and the stub's base URL.
 func newTestApp(t *testing.T) (*App, string) {
 	t.Helper()
+	app, url, _ := newTestAppWith(t, nil)
+	return app, url
+}
+
+// newTestAppWith is newTestApp with extra secure settings. Its stub also
+// accepts POST /notifications and keeps their bodies, returned by the func.
+func newTestAppWith(t *testing.T, secure map[string]string) (*App, string, func() []string) {
+	t.Helper()
+	var (
+		mu     sync.Mutex
+		notifs []string
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// /me never existed at the gateway; only /auth/me is real.
 		if r.URL.Path == "/auth/me" && r.Header.Get("Authorization") == "Bearer "+testAPIKey {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"id":"test"}`))
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/notifications" && r.Header.Get("Authorization") == "Bearer "+testAPIKey {
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			notifs = append(notifs, string(body))
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":1,"pushed":true}`))
 			return
 		}
 		if r.URL.Path == "/me" {
@@ -45,9 +71,11 @@ func newTestApp(t *testing.T) (*App, string) {
 	}))
 	t.Cleanup(srv.Close)
 
+	sec := map[string]string{"apiKey": testAPIKey}
+	maps.Copy(sec, secure)
 	inst, err := NewApp(context.Background(), backend.AppInstanceSettings{
 		JSONData:                json.RawMessage(fmt.Sprintf(`{"apiUrl":%q,"datasourceUid":"prom-uid"}`, srv.URL)),
-		DecryptedSecureJSONData: map[string]string{"apiKey": testAPIKey},
+		DecryptedSecureJSONData: sec,
 	})
 	if err != nil {
 		t.Fatalf("new app: %s", err)
@@ -57,15 +85,26 @@ func newTestApp(t *testing.T) (*App, string) {
 		t.Fatal("inst must be of type *App")
 	}
 	t.Cleanup(app.Dispose)
-	return app, srv.URL
+	sent := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), notifs...)
+	}
+	return app, srv.URL, sent
 }
 
 func callResource(t *testing.T, app *App, method, path string) *backend.CallResourceResponse {
+	t.Helper()
+	return callResourceBody(t, app, method, path, nil)
+}
+
+func callResourceBody(t *testing.T, app *App, method, path string, body []byte) *backend.CallResourceResponse {
 	t.Helper()
 	var r mockCallResourceResponseSender
 	if err := app.CallResource(context.Background(), &backend.CallResourceRequest{
 		Method: method,
 		Path:   path,
+		Body:   body,
 	}, &r); err != nil {
 		t.Fatalf("CallResource %s %s: %s", method, path, err)
 	}
@@ -128,6 +167,87 @@ func TestConfigResource(t *testing.T) {
 	// The secret itself must never be echoed.
 	if _, leaked := body["apiKey"]; leaked {
 		t.Error("config response leaked apiKey")
+	}
+	if body["e2eKeyId"] != "" || body["e2eError"] != "" {
+		t.Errorf("e2eKeyId/e2eError = %v/%v, want both empty without a key", body["e2eKeyId"], body["e2eError"])
+	}
+}
+
+func TestConfigResourceE2EKey(t *testing.T) {
+	k, err := e2e.ParseKey(testE2EKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app, _, _ := newTestAppWith(t, map[string]string{"e2eKey": testE2EKey})
+	resp := callResource(t, app, http.MethodGet, "config")
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("decode config body: %s", err)
+	}
+	if body["e2eKeyId"] != k.KID() || body["e2eError"] != "" {
+		t.Errorf("e2eKeyId/e2eError = %v/%v, want %s and no error", body["e2eKeyId"], body["e2eError"], k.KID())
+	}
+	if strings.Contains(string(resp.Body), testE2EKey) {
+		t.Error("config response leaked the encryption key")
+	}
+
+	const bad = "0123456789abcdef"
+	app, _, _ = newTestAppWith(t, map[string]string{"e2eKey": bad})
+	for _, path := range []string{"config", "healthz"} {
+		resp = callResource(t, app, http.MethodGet, path)
+		var body map[string]any
+		if err := json.Unmarshal(resp.Body, &body); err != nil {
+			t.Fatalf("decode %s body: %s", path, err)
+		}
+		if e, _ := body["e2eError"].(string); e == "" {
+			t.Errorf("%s e2eError is empty for an invalid key", path)
+		}
+		if strings.Contains(string(resp.Body), bad) {
+			t.Errorf("%s response repeats the invalid key", path)
+		}
+	}
+}
+
+func TestTestNotificationIsSealed(t *testing.T) {
+	k, err := e2e.ParseKey(testE2EKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, _, sent := newTestAppWith(t, map[string]string{"e2eKey": testE2EKey})
+	resp := callResourceBody(t, app, http.MethodPost, "test", []byte(`{"kind":"notification"}`))
+	if resp.Status != http.StatusOK {
+		t.Fatalf("test status = %d (%s), want 200", resp.Status, resp.Body)
+	}
+	if !strings.Contains(string(resp.Body), k.KID()) {
+		t.Errorf("test response %s does not name the Key ID", resp.Body)
+	}
+	notifs := sent()
+	if len(notifs) != 1 {
+		t.Fatalf("got %d notifications, want 1", len(notifs))
+	}
+	var req struct {
+		Title     string `json:"title"`
+		Encrypted string `json:"encrypted"`
+	}
+	if err := json.Unmarshal([]byte(notifs[0]), &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.Title != "" {
+		t.Errorf("title %q sent in the clear", req.Title)
+	}
+	if m, err := e2e.Open(k, req.Encrypted); err != nil || m.Title != "PushWard test" {
+		t.Errorf("open = %+v, %v; want the test notification", m, err)
+	}
+
+	// An invalid key fails the test rather than sending anything.
+	app, _, sent = newTestAppWith(t, map[string]string{"e2eKey": "nope"})
+	resp = callResourceBody(t, app, http.MethodPost, "test", []byte(`{"kind":"notification"}`))
+	if resp.Status != http.StatusBadRequest || !strings.Contains(string(resp.Body), "encryption key invalid") {
+		t.Errorf("test with an invalid key = %d %s, want 400 naming the key", resp.Status, resp.Body)
+	}
+	if n := len(sent()); n != 0 {
+		t.Errorf("got %d notifications with an invalid key, want none", n)
 	}
 }
 

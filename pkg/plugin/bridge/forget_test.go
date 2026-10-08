@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -33,16 +34,16 @@ func TestActiveAlertsAndForget(t *testing.T) {
 		t.Errorf("grafana-abc = %+v, want alertname=HighCPU ruleUid=rule-1", a)
 	}
 
-	if !b.Forget("grafana-abc") {
+	if !b.Forget(context.Background(), "grafana-abc") {
 		t.Fatal("Forget returned false for a tracked slug")
 	}
-	if b.Forget("grafana-abc") {
+	if b.Forget(context.Background(), "grafana-abc") {
 		t.Error("Forget returned true for an already-removed slug")
 	}
 	if n := b.ActiveCount(); n != 1 {
 		t.Fatalf("ActiveCount = %d after Forget, want 1", n)
 	}
-	if b.Forget("does-not-exist") {
+	if b.Forget(context.Background(), "does-not-exist") {
 		t.Error("Forget returned true for an unknown slug")
 	}
 }

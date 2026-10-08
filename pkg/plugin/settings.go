@@ -3,9 +3,11 @@ package plugin
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
+	"github.com/mac-lucky/pushward-integrations/shared/e2e"
 	"github.com/mac-lucky/pushward-integrations/shared/pushward"
 
 	"github.com/mac-lucky/pushward-grafana-plugin/pkg/plugin/widgets"
@@ -27,12 +29,25 @@ const (
 	defaultPollInterval  = 30 * time.Second
 	defaultCleanupDelay  = 15 * time.Minute
 	defaultStaleTimeout  = 24 * time.Hour
+	defaultAckRepeat     = 300  // seconds
+	defaultAckExpire     = 3600 // seconds
+)
+
+// Server bounds for an acknowledged notification, in seconds. Out-of-range
+// values are clamped here: the server answers them with a 422 that would cost
+// the acknowledge on every alert.
+const (
+	minAckRepeat = 30
+	maxAckRepeat = 3600
+	minAckExpire = 60
+	maxAckExpire = 10800
 )
 
 // Secure-settings keys (DecryptedSecureJSONData).
 const (
 	secureKeyAPIKey       = "apiKey"
 	secureKeyWebhookToken = "webhookToken"
+	secureKeyE2EKey       = "e2eKey"
 )
 
 // validNotifyLevels is the set of interruption levels the config UI exposes for
@@ -73,6 +88,14 @@ type Settings struct {
 	// (Normal) / critical (Critical); defaults to active.
 	NotifyLevel string
 
+	// Ack makes the firing AlsoNotify push repeat every AckRepeat seconds
+	// until it is acknowledged on a device or AckExpire passes. Off by
+	// default, and always off at the passive level, which the server refuses
+	// to acknowledge.
+	Ack       bool
+	AckRepeat int
+	AckExpire int
+
 	// Widgets are the scheduled-PromQL widget specs published to the server
 	// widget API. Empty when no widgets are configured (the engine stays off).
 	Widgets []widgets.WidgetConfig
@@ -85,6 +108,13 @@ type Settings struct {
 	// Secrets — never echoed by /config or logged.
 	APIKey       string
 	WebhookToken string
+
+	// E2EKey seals the AlsoNotify pushes end to end; nil when no key is set.
+	// E2EError is non-empty when a key is set but does not parse: the pushes
+	// then go out content-free, and the message is surfaced on /config and
+	// /healthz like WidgetsError. Only the Key ID of a key is ever shown.
+	E2EKey   *e2e.Key
+	E2EError string
 }
 
 // rawJSONData is the on-the-wire shape of jsonData. Numbers and booleans use
@@ -105,6 +135,9 @@ type rawJSONData struct {
 	Decimals        *int   `json:"decimals"`
 	AlsoNotify      *bool  `json:"alsoNotify"`
 	NotifyLevel     string `json:"notifyLevel"`
+	AckEnabled      *bool  `json:"ackEnabled"`
+	AckRepeat       *int   `json:"ackRepeatSeconds"`
+	AckExpire       *int   `json:"ackExpireSeconds"`
 	// Widgets is the raw widget array, parsed + validated by the widgets
 	// package. Kept as RawMessage so a malformed entry yields a precise
 	// per-widget error instead of failing the whole jsonData unmarshal.
@@ -136,6 +169,8 @@ func LoadSettings(s backend.AppInstanceSettings) (*Settings, error) {
 		Decimals:        defaultDecimals,
 		AlsoNotify:      defaultAlsoNotify,
 		NotifyLevel:     defaultNotifyLevel,
+		AckRepeat:       defaultAckRepeat,
+		AckExpire:       defaultAckExpire,
 	}
 	if raw.Priority != nil {
 		out.Priority = *raw.Priority
@@ -152,6 +187,17 @@ func LoadSettings(s backend.AppInstanceSettings) (*Settings, error) {
 	if validNotifyLevels[raw.NotifyLevel] {
 		out.NotifyLevel = raw.NotifyLevel
 	}
+	if raw.AckEnabled != nil {
+		out.Ack = *raw.AckEnabled && out.NotifyLevel != pushward.LevelPassive
+	}
+	// 0 is an emptied number field: keep the default rather than clamping it
+	// to the shortest interval.
+	if raw.AckRepeat != nil && *raw.AckRepeat > 0 {
+		out.AckRepeat = min(max(*raw.AckRepeat, minAckRepeat), maxAckRepeat)
+	}
+	if raw.AckExpire != nil && *raw.AckExpire > 0 {
+		out.AckExpire = min(max(*raw.AckExpire, minAckExpire), maxAckExpire)
+	}
 
 	// Parse widgets out of band: a malformed entry must not fail the whole
 	// settings load (which would dark the timeline path too). On error the
@@ -165,6 +211,13 @@ func LoadSettings(s backend.AppInstanceSettings) (*Settings, error) {
 	if s.DecryptedSecureJSONData != nil {
 		out.APIKey = s.DecryptedSecureJSONData[secureKeyAPIKey]
 		out.WebhookToken = s.DecryptedSecureJSONData[secureKeyWebhookToken]
+		if v := s.DecryptedSecureJSONData[secureKeyE2EKey]; strings.TrimSpace(v) != "" {
+			if k, err := e2e.ParseKey(v); err != nil {
+				out.E2EError = err.Error()
+			} else {
+				out.E2EKey = k
+			}
+		}
 	}
 
 	return out, nil

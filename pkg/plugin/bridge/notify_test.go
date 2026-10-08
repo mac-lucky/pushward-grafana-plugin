@@ -3,7 +3,10 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,8 +15,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/mac-lucky/pushward-integrations/shared/e2e"
 	"github.com/mac-lucky/pushward-integrations/shared/pushward"
 	"github.com/mac-lucky/pushward-integrations/shared/syncx"
+	"github.com/mac-lucky/pushward-integrations/shared/testutil"
 	"github.com/mac-lucky/pushward-integrations/shared/text"
 )
 
@@ -419,5 +424,513 @@ func TestAlsoNotifyResolvedOffSendsNoNotification(t *testing.T) {
 	}
 	if notif := s.find(http.MethodPost, "/notifications"); notif != nil {
 		t.Errorf("no notification should be sent when AlsoNotify is off, got %+v", notif.body)
+	}
+}
+
+// testE2EKey is a fixed encryption key for the sealing tests.
+const testE2EKey = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+
+func mustKey(t *testing.T) *e2e.Key {
+	t.Helper()
+	k, err := e2e.ParseKey(testE2EKey)
+	if err != nil {
+		t.Fatalf("parse test key: %v", err)
+	}
+	return k
+}
+
+// recLog is a DeliveryLogger that keeps every entry.
+type recLog struct {
+	mu      sync.Mutex
+	entries []logEntry
+}
+
+type logEntry struct {
+	slug, action string
+	ok           bool
+	detail       string
+}
+
+func (l *recLog) Log(_, slug, action string, ok bool, detail string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = append(l.entries, logEntry{slug: slug, action: action, ok: ok, detail: detail})
+}
+
+func (l *recLog) find(action string) *logEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i := range l.entries {
+		if l.entries[i].action == action {
+			return &l.entries[i]
+		}
+	}
+	return nil
+}
+
+// mockServer is the shared contract mock: it validates every request the way
+// the server does and keeps acknowledged sends as receipts.
+type mockServer struct {
+	url   string
+	calls *[]testutil.APICall
+	mu    *sync.Mutex
+}
+
+func newMockServer(t *testing.T, opts testutil.MockOptions) mockServer {
+	srv, calls, mu := testutil.MockPushWardServerWith(t, opts)
+	return mockServer{url: srv.URL, calls: calls, mu: mu}
+}
+
+// requests returns the recorded calls to method+path, in order, with each
+// call's index among all calls so a test can check what came first.
+func (m mockServer) requests(t *testing.T, method, path string) (bodies []map[string]any, idx []int) {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, c := range *m.calls {
+		if c.Method != method || c.Path != path {
+			continue
+		}
+		var body map[string]any
+		if err := json.Unmarshal(c.Body, &body); err != nil {
+			t.Fatalf("decode %s %s body: %v", method, path, err)
+		}
+		bodies = append(bodies, body)
+		idx = append(idx, i)
+	}
+	return bodies, idx
+}
+
+func (m mockServer) rawNotifications(t *testing.T) []string {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for _, c := range *m.calls {
+		if c.Method == http.MethodPost && c.Path == "/notifications" {
+			out = append(out, string(c.Body))
+		}
+	}
+	return out
+}
+
+func ackConfig() Config {
+	return Config{AlsoNotify: true, Ack: true, AckRepeat: 120, AckExpire: 1800, SeverityLabel: "severity", DefaultSeverity: "warning"}
+}
+
+func resolvedAlert() alert {
+	return alert{
+		Status:      alertStatusResolved,
+		Fingerprint: "fp1",
+		Labels:      map[string]string{"alertname": "HighCPU"},
+		Annotations: map[string]string{"summary": "CPU back to normal"},
+	}
+}
+
+func TestAckFiringRepeatsAndResolveCancelsFirst(t *testing.T) {
+	m := newMockServer(t, testutil.MockOptions{})
+	b := newTestBridge(t, m.url, nil, ackConfig())
+	dl := &recLog{}
+	b.deliveryLog = dl
+	slug := makeSlug("HighCPU")
+
+	b.handleFiring(context.Background(), firingAlert())
+
+	notifs, _ := m.requests(t, http.MethodPost, "/notifications")
+	if len(notifs) != 1 {
+		t.Fatalf("got %d notifications after firing, want 1", len(notifs))
+	}
+	ack, _ := notifs[0]["acknowledge"].(map[string]any)
+	if ack == nil {
+		t.Fatalf("firing push has no acknowledge: %v", notifs[0])
+	}
+	if ack["repeat_seconds"] != float64(120) || ack["expire_seconds"] != float64(1800) {
+		t.Errorf("acknowledge = %v, want repeat 120 / expire 1800", ack)
+	}
+	if tags, _ := notifs[0]["tags"].([]any); len(tags) != 1 || tags[0] != slug {
+		t.Errorf("tags = %v, want [%s]", notifs[0]["tags"], slug)
+	}
+	if got := notifs[0]["collapse_id"]; got != text.SlugHash("grafana", "HighCPU", 6) {
+		t.Errorf("collapse_id = %v, want it kept on an acknowledged push", got)
+	}
+	if e := dl.find("notified"); e == nil || !strings.Contains(e.detail, "ack") {
+		t.Errorf("delivery log notified = %+v, want detail noting ack", e)
+	}
+
+	b.handleResolved(context.Background(), resolvedAlert())
+
+	cancels, cancelIdx := m.requests(t, http.MethodPost, "/notifications/receipts/cancel")
+	if len(cancels) != 1 || cancels[0]["tag"] != slug {
+		t.Fatalf("cancel requests = %v, want one for tag %s", cancels, slug)
+	}
+	notifs, notifIdx := m.requests(t, http.MethodPost, "/notifications")
+	if len(notifs) != 2 {
+		t.Fatalf("got %d notifications, want firing + resolved", len(notifs))
+	}
+	if cancelIdx[0] > notifIdx[1] {
+		t.Error("repeats were canceled after the resolved push; a late repeat would replace it")
+	}
+	if _, ok := notifs[1]["acknowledge"]; ok {
+		t.Error("the resolved push must not ask for acknowledge")
+	}
+	if _, ok := notifs[1]["tags"]; ok {
+		t.Error("the resolved push must not carry tags")
+	}
+	if e := dl.find("ack-canceled"); e == nil || !e.ok || e.detail != "1" {
+		t.Errorf("delivery log ack-canceled = %+v, want ok with count 1", e)
+	}
+}
+
+func TestAckOffAtPassiveLevel(t *testing.T) {
+	m := newMockServer(t, testutil.MockOptions{})
+	cfg := ackConfig()
+	cfg.NotifyLevel = pushward.LevelPassive
+	b := newTestBridge(t, m.url, nil, cfg)
+
+	b.handleFiring(context.Background(), firingAlert())
+	b.handleResolved(context.Background(), resolvedAlert())
+
+	notifs, _ := m.requests(t, http.MethodPost, "/notifications")
+	if len(notifs) != 2 {
+		t.Fatalf("got %d notifications, want firing + resolved", len(notifs))
+	}
+	for _, n := range notifs {
+		if _, ok := n["acknowledge"]; ok {
+			t.Errorf("passive push asked for acknowledge, which the server refuses: %v", n)
+		}
+	}
+	if cancels, _ := m.requests(t, http.MethodPost, "/notifications/receipts/cancel"); len(cancels) != 0 {
+		t.Errorf("got %d cancel requests with acknowledge off, want none", len(cancels))
+	}
+}
+
+func TestAckRefusedResendsWithoutAck(t *testing.T) {
+	cases := []struct {
+		status int
+		code   string
+		reason string
+	}{
+		{http.StatusConflict, pushward.ErrCodeNotificationReceiptLimit, pushward.ErrCodeNotificationReceiptLimit},
+		{http.StatusUnprocessableEntity, pushward.ErrCodeNotificationReceiptDisabled, pushward.ErrCodeNotificationReceiptDisabled},
+		{http.StatusUnprocessableEntity, pushward.ErrCodeNotificationAnswerURLUnavailable, pushward.ErrCodeNotificationAnswerURLUnavailable},
+		{http.StatusUnprocessableEntity, pushward.ErrCodeNotificationEncryptedTooLarge, pushward.ErrCodeNotificationEncryptedTooLarge},
+		{http.StatusBadRequest, pushward.ErrCodeNotificationInvalid, pushward.ErrCodeNotificationInvalid},
+		{http.StatusUnprocessableEntity, "", "status 422"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.reason, func(t *testing.T) {
+			m := newMockServer(t, testutil.MockOptions{AckStatus: tc.status, AckCode: tc.code})
+			b := newTestBridge(t, m.url, nil, ackConfig())
+			dl := &recLog{}
+			b.deliveryLog = dl
+			slug := makeSlug("HighCPU")
+
+			b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false)
+
+			notifs, _ := m.requests(t, http.MethodPost, "/notifications")
+			if len(notifs) != 2 {
+				t.Fatalf("got %d sends, want the refused one plus one without acknowledge", len(notifs))
+			}
+			if _, ok := notifs[0]["acknowledge"]; !ok {
+				t.Error("first send should carry acknowledge")
+			}
+			if _, ok := notifs[1]["acknowledge"]; ok {
+				t.Error("the resend must drop acknowledge")
+			}
+			if _, ok := notifs[1]["tags"]; ok {
+				t.Error("the resend must drop the tags, which need acknowledge")
+			}
+			if notifs[1]["title"] != "HighCPU" || notifs[1]["collapse_id"] != notifs[0]["collapse_id"] {
+				t.Errorf("resend changed the alert: %v", notifs[1])
+			}
+			e := dl.find("notified")
+			if e == nil || !e.ok || !strings.Contains(e.detail, "ack refused: "+tc.reason) {
+				t.Errorf("delivery log notified = %+v, want ok with ack refused: %s", e, tc.reason)
+			}
+		})
+	}
+}
+
+func TestAckRefusalOnlyForAckErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"receipt cap", &pushward.HTTPError{StatusCode: 409, Code: pushward.ErrCodeNotificationReceiptLimit}, pushward.ErrCodeNotificationReceiptLimit},
+		{"receipts disabled", &pushward.HTTPError{StatusCode: 422, Code: pushward.ErrCodeNotificationReceiptDisabled}, pushward.ErrCodeNotificationReceiptDisabled},
+		{"schema", &pushward.HTTPError{StatusCode: 422}, "status 422"},
+		{"handler rule", &pushward.HTTPError{StatusCode: 400, Code: pushward.ErrCodeNotificationInvalid}, pushward.ErrCodeNotificationInvalid},
+		{"other 409", &pushward.HTTPError{StatusCode: 409, Code: "activity.limit_exceeded"}, ""},
+		{"org key", &pushward.HTTPError{StatusCode: 422, Code: pushward.ErrCodeNotificationEncryptionUnavailable}, ""},
+		{"bad key", &pushward.HTTPError{StatusCode: 401}, ""},
+		{"forbidden", &pushward.HTTPError{StatusCode: 403}, ""},
+		{"quota", &pushward.QuotaExceededError{HTTPError: &pushward.HTTPError{StatusCode: 429, Code: pushward.ErrCodeQuotaExceeded}}, ""},
+		{"server error", fmt.Errorf("max retries exceeded: %w", &pushward.HTTPError{StatusCode: 503}), ""},
+		{"network", errors.New("dial tcp: connection refused"), ""},
+		{"success", nil, ""},
+	}
+	for _, tc := range cases {
+		if got := ackRefusal(tc.err); got != tc.want {
+			t.Errorf("%s: ackRefusal = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestAckNoResendWhenKeyRejected(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			m := newMockServer(t, testutil.MockOptions{NotifyStatus: status})
+			b := newTestBridge(t, m.url, nil, ackConfig())
+			slug := makeSlug("HighCPU")
+
+			b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false)
+
+			if notifs, _ := m.requests(t, http.MethodPost, "/notifications"); len(notifs) != 1 {
+				t.Errorf("got %d sends after a %d, want 1 (no resend)", len(notifs), status)
+			}
+		})
+	}
+}
+
+// TestAckCanceledOnEveryEnd covers the paths that end an alert without a
+// resolved webhook for a tracked entry: each one stops the repeats.
+func TestAckCanceledOnEveryEnd(t *testing.T) {
+	slug := makeSlug("HighCPU")
+	cases := []struct {
+		name         string
+		end          func(b *Bridge)
+		wantResolved bool
+	}{
+		{"alertmanager backstop", func(b *Bridge) {
+			b.endAlertActivity(context.Background(), "HighCPU", &alertState{slug: slug, alertname: "HighCPU"})
+		}, true},
+		{"stale sweep", func(b *Bridge) {
+			b.active["HighCPU"] = &alertState{slug: slug, alertname: "HighCPU", lastSeen: time.Now().Add(-time.Hour)}
+			b.sweepStale(context.Background(), time.Minute)
+		}, false},
+		{"End from the Activities page", func(b *Bridge) {
+			b.active["HighCPU"] = &alertState{slug: slug, alertname: "HighCPU", lastSeen: time.Now()}
+			b.Forget(context.Background(), slug)
+		}, false},
+		{"resolved webhook for an untracked alert", func(b *Bridge) {
+			b.handleResolved(context.Background(), resolvedAlert())
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newMockServer(t, testutil.MockOptions{})
+			b := newTestBridge(t, m.url, nil, ackConfig())
+			dl := &recLog{}
+			b.deliveryLog = dl
+			// The firing push, so there is a receipt to cancel.
+			b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false)
+
+			tc.end(b)
+
+			cancels, cancelIdx := m.requests(t, http.MethodPost, "/notifications/receipts/cancel")
+			if len(cancels) != 1 || cancels[0]["tag"] != slug {
+				t.Fatalf("cancel requests = %v, want one for tag %s", cancels, slug)
+			}
+			if e := dl.find("ack-canceled"); e == nil || e.detail != "1" {
+				t.Errorf("delivery log ack-canceled = %+v, want count 1", e)
+			}
+			notifs, notifIdx := m.requests(t, http.MethodPost, "/notifications")
+			if !tc.wantResolved {
+				if len(notifs) != 1 {
+					t.Errorf("got %d notifications, want only the firing one", len(notifs))
+				}
+				return
+			}
+			if len(notifs) != 2 {
+				t.Fatalf("got %d notifications, want firing + resolved", len(notifs))
+			}
+			if cancelIdx[0] > notifIdx[1] {
+				t.Error("repeats were canceled after the resolved push")
+			}
+		})
+	}
+}
+
+func TestAckCancelFailureStillSendsResolved(t *testing.T) {
+	m := newMockServer(t, testutil.MockOptions{CancelStatus: http.StatusBadRequest})
+	b := newTestBridge(t, m.url, nil, ackConfig())
+	dl := &recLog{}
+	b.deliveryLog = dl
+	b.active["HighCPU"] = &alertState{
+		slug:         makeSlug("HighCPU"),
+		alertname:    "HighCPU",
+		fingerprints: map[string]struct{}{"fp1": {}},
+		lastSeen:     time.Now(),
+	}
+
+	b.handleResolved(context.Background(), resolvedAlert())
+
+	if e := dl.find("ack-cancel"); e == nil || e.ok {
+		t.Errorf("delivery log ack-cancel = %+v, want a recorded failure", e)
+	}
+	notifs, _ := m.requests(t, http.MethodPost, "/notifications")
+	if len(notifs) != 1 {
+		t.Fatalf("got %d notifications, want the resolved push despite the failed cancel", len(notifs))
+	}
+	if body, _ := notifs[0]["body"].(string); !strings.HasPrefix(body, "Resolved") {
+		t.Errorf("body = %q, want the resolved push", body)
+	}
+}
+
+func TestSealedNotificationOpensWithKey(t *testing.T) {
+	m := newMockServer(t, testutil.MockOptions{})
+	cfg := ackConfig()
+	cfg.E2EKey = mustKey(t)
+	b := newTestBridge(t, m.url, nil, cfg)
+	dl := &recLog{}
+	b.deliveryLog = dl
+	slug := makeSlug("HighCPU")
+
+	b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false)
+
+	notifs, _ := m.requests(t, http.MethodPost, "/notifications")
+	if len(notifs) != 1 {
+		t.Fatalf("got %d notifications, want 1", len(notifs))
+	}
+	n := notifs[0]
+	for _, f := range []string{"title", "subtitle", "body", "url"} {
+		if v, _ := n[f].(string); v != "" {
+			t.Errorf("sealed push carries %s in the clear: %q", f, v)
+		}
+	}
+	raw := m.rawNotifications(t)[0]
+	for _, s := range []string{"HighCPU", "node-1", "CPU is high"} {
+		if strings.Contains(raw, s) {
+			t.Errorf("sealed request contains %q: %s", s, raw)
+		}
+	}
+	env, _ := n["encrypted"].(string)
+	msg, err := e2e.Open(mustKey(t), env)
+	if err != nil {
+		t.Fatalf("open envelope: %v", err)
+	}
+	if msg.Title != "HighCPU" || msg.Subtitle != "Grafana · node-1" || msg.Body != "CPU is high" {
+		t.Errorf("opened %+v, want the alert text", msg)
+	}
+	// What the server needs to deliver stays readable.
+	if n["level"] != pushward.LevelActive || n["collapse_id"] != text.SlugHash("grafana", "HighCPU", 6) || n["activity_slug"] != slug {
+		t.Errorf("sealed push lost its delivery fields: %v", n)
+	}
+	if _, ok := n["acknowledge"]; !ok {
+		t.Error("sealed push dropped acknowledge")
+	}
+	if e := dl.find("notified"); e == nil || !strings.Contains(e.detail, "encrypted") {
+		t.Errorf("delivery log notified = %+v, want detail noting encrypted", e)
+	}
+}
+
+func TestInvalidKeySendsContentFreeAlert(t *testing.T) {
+	for _, resolved := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resolved=%v", resolved), func(t *testing.T) {
+			m := newMockServer(t, testutil.MockOptions{})
+			cfg := ackConfig()
+			cfg.NotifyLevel = pushward.LevelCritical
+			cfg.E2EKeyError = "an encryption key is 64 hex characters, got 12"
+			b := newTestBridge(t, m.url, nil, cfg)
+			dl := &recLog{}
+			b.deliveryLog = dl
+			slug := makeSlug("HighCPU")
+			a := firingAlert()
+			if resolved {
+				a = resolvedAlert()
+				a.Labels["instance"] = "node-1"
+			}
+
+			b.sendAlertNotification(context.Background(), slog.Default(), a, slug, slug, "HighCPU", resolved)
+
+			notifs, _ := m.requests(t, http.MethodPost, "/notifications")
+			if len(notifs) != 1 {
+				t.Fatalf("got %d notifications, want 1: an invalid key must not cost the alert", len(notifs))
+			}
+			n := notifs[0]
+			wantTitle := contentFreeFiring
+			if resolved {
+				wantTitle = contentFreeResolved
+			}
+			if n["title"] != wantTitle || n["body"] != contentFreeBody {
+				t.Errorf("title/body = %v / %v, want %q / %q", n["title"], n["body"], wantTitle, contentFreeBody)
+			}
+			if _, ok := n["subtitle"]; ok {
+				t.Errorf("content-free push kept the subtitle %v", n["subtitle"])
+			}
+			if _, ok := n["encrypted"]; ok {
+				t.Error("content-free push carries an envelope")
+			}
+			if n["level"] != pushward.LevelCritical {
+				t.Errorf("level = %v, want the configured level", n["level"])
+			}
+			raw := m.rawNotifications(t)[0]
+			for _, s := range []string{"HighCPU", "node-1", "CPU"} {
+				if strings.Contains(raw, s) {
+					t.Errorf("content-free request contains %q: %s", s, raw)
+				}
+			}
+			if e := dl.find("notified"); e == nil || !strings.Contains(e.detail, "content-free") {
+				t.Errorf("delivery log notified = %+v, want detail noting content-free", e)
+			}
+		})
+	}
+}
+
+// resolvingResolver resolves the alert from inside the firing path, which is
+// where a concurrent resolved webhook lands when it overtakes the deferred
+// firing push.
+type resolvingResolver struct {
+	resolve func()
+}
+
+func (r resolvingResolver) ExtractRuleUID(string) string { return "rule-1" }
+
+func (r resolvingResolver) GetRuleQuery(context.Context, string) (string, string, error) {
+	r.resolve()
+	return "", "", errors.New("no query")
+}
+
+func (r resolvingResolver) IsAlertFiring(context.Context, string) (bool, error) { return false, nil }
+
+func TestAckCanceledWhenResolveOvertakesFiringPush(t *testing.T) {
+	m := newMockServer(t, testutil.MockOptions{})
+	var b *Bridge
+	res := resolvingResolver{resolve: func() { b.handleResolved(context.Background(), resolvedAlert()) }}
+	b = newTestBridge(t, m.url, res, ackConfig())
+	dl := &recLog{}
+	b.deliveryLog = dl
+	slug := makeSlug("HighCPU")
+
+	a := firingAlert()
+	a.GeneratorURL = "http://grafana/alerting/grafana/rule-1/view"
+	b.handleFiring(context.Background(), a)
+
+	notifs, notifIdx := m.requests(t, http.MethodPost, "/notifications")
+	firing := -1
+	for i, n := range notifs {
+		if _, ok := n["acknowledge"]; ok {
+			firing = notifIdx[i]
+		}
+	}
+	if firing < 0 {
+		t.Fatalf("no acknowledged firing push among %v", notifs)
+	}
+	cancels, cancelIdx := m.requests(t, http.MethodPost, "/notifications/receipts/cancel")
+	if len(cancels) == 0 || cancelIdx[len(cancelIdx)-1] < firing {
+		t.Fatalf("cancel requests at %v, want one after the acknowledged push at %d", cancelIdx, firing)
+	}
+	if cancels[len(cancels)-1]["tag"] != slug {
+		t.Errorf("late cancel tag = %v, want %s", cancels[len(cancels)-1]["tag"], slug)
+	}
+	var stopped bool
+	dl.mu.Lock()
+	for _, e := range dl.entries {
+		stopped = stopped || (e.action == "ack-canceled" && e.detail == "1")
+	}
+	dl.mu.Unlock()
+	if !stopped {
+		t.Error("the repeats of the late firing push were never stopped")
 	}
 }

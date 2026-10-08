@@ -119,6 +119,11 @@ func NewApp(ctx context.Context, settings backend.AppInstanceSettings) (instance
 		Decimals:        &s.Decimals,
 		AlsoNotify:      s.AlsoNotify,
 		NotifyLevel:     s.NotifyLevel,
+		Ack:             s.Ack,
+		AckRepeat:       s.AckRepeat,
+		AckExpire:       s.AckExpire,
+		E2EKey:          s.E2EKey,
+		E2EKeyError:     s.E2EError,
 	})
 
 	// Seed the Grafana connection from the construction context if present; it is
@@ -298,6 +303,9 @@ func (a *App) CheckHealth(ctx context.Context, _ *backend.CheckHealthRequest) (*
 	}
 	if _, wmsg := a.widgetStatus(); wmsg != "" {
 		msg += " Widgets: " + wmsg + "."
+	}
+	if a.settings.E2EError != "" {
+		msg += " Encryption key invalid, alert pushes are sent without the alert text: " + a.settings.E2EError + "."
 	}
 	return &backend.CheckHealthResult{Status: backend.HealthStatusOk, Message: msg}, nil
 }

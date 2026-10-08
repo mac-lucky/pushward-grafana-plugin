@@ -105,6 +105,9 @@ func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if a.settings.WidgetsError == "" && widgetsMsg != "" {
 		msg += " | Widgets: " + widgetsMsg
 	}
+	if a.settings.E2EError != "" {
+		msg += " | Encryption key invalid, alert pushes are sent without the alert text: " + a.settings.E2EError
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":           keyValid,
@@ -114,17 +117,23 @@ func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"history":      historyOK,
 		"widgets":      widgetsPublishing,
 		"widgetsError": a.settings.WidgetsError,
+		"e2eError":     a.settings.E2EError,
 		"message":      msg,
 	})
 }
 
 // handleConfig echoes the non-secret configuration plus connection status. It
-// never returns the API key or webhook token.
+// never returns the API key, webhook token or encryption key; the encryption
+// key shows only as its Key ID, which the apps display next to the key.
 func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if !requireGet(w, r) {
 		return
 	}
 	s := a.settings
+	e2eKeyID := ""
+	if s.E2EKey != nil {
+		e2eKeyID = s.E2EKey.KID()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"apiUrl":           s.APIURL,
 		"datasourceUid":    s.DatasourceUID,
@@ -143,6 +152,8 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"apiKeySet":        s.APIKey != "",
 		"webhookConnected": s.WebhookToken != "",
 		"webhookUrl":       webhookResourcePath,
+		"e2eKeyId":         e2eKeyID,
+		"e2eError":         s.E2EError,
 	})
 }
 
@@ -172,7 +183,7 @@ func (a *App) handleEndActivity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.bridge != nil {
-		a.bridge.Forget(body.Slug)
+		a.bridge.Forget(r.Context(), body.Slug)
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
@@ -229,7 +240,7 @@ func (a *App) handleTest(w http.ResponseWriter, r *http.Request) {
 		err = a.sendTestTimeline(ctx)
 		msg = "Test timeline Live Activity sent — check your iPhone."
 	default:
-		err = a.pw.SendNotification(ctx, pushward.SendNotificationRequest{
+		req := pushward.SendNotificationRequest{
 			Title:    "PushWard test",
 			Subtitle: "Grafana",
 			Body:     "Your Grafana → PushWard connection works.",
@@ -237,8 +248,25 @@ func (a *App) handleTest(w http.ResponseWriter, r *http.Request) {
 			Source:   "grafana",
 			Level:    firstNonEmpty(a.settings.NotifyLevel, pushward.LevelActive),
 			Push:     pushward.BoolPtr(true),
-		})
+		}
+		// Sealed like the alert pushes, so the test also proves the key. A
+		// key that does not parse fails the test instead of sending the
+		// content-free alert the bridge falls back to.
+		sealed, serr := bridge.SealNotification(a.settings.E2EKey, a.settings.E2EError, &req)
+		if serr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": serr.Error()})
+			return
+		}
+		err = a.pw.SendNotification(ctx, req)
 		msg = "Test notification sent — check your iPhone."
+		if sealed {
+			msg = "Encrypted test notification sent with Key ID " + a.settings.E2EKey.KID() + ". Check your iPhone."
+		}
+	}
+	var he *pushward.HTTPError
+	if errors.As(err, &he) && he.Code == pushward.ErrCodeNotificationEncryptionUnavailable {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "message": "Organization keys cannot send encrypted notifications. Remove the encryption key or use a personal integration key."})
+		return
 	}
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "message": err.Error()})

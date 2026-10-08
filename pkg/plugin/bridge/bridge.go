@@ -10,12 +10,15 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/mac-lucky/pushward-integrations/shared/e2e"
 	"github.com/mac-lucky/pushward-integrations/shared/pushward"
 	"github.com/mac-lucky/pushward-integrations/shared/syncx"
 	"github.com/mac-lucky/pushward-integrations/shared/text"
@@ -53,6 +56,15 @@ const (
 	// a safety net behind the webhook self-loop, so it stays conservative to
 	// avoid hammering the alertmanager API even with many active alerts.
 	alertCheckInterval = time.Minute
+
+	// ackCancelTimeout bounds stopping the repeats of an acknowledged push on
+	// resolve, so a slow cancel never holds up the resolved push behind it.
+	ackCancelTimeout = 5 * time.Second
+
+	// What a push says in place of the alert when it cannot be encrypted.
+	contentFreeFiring   = "Grafana alert firing"
+	contentFreeResolved = "Grafana alert resolved"
+	contentFreeBody     = "Encryption key invalid, check the PushWard plugin settings"
 )
 
 // GrafanaResolver resolves a Grafana alert rule's PromQL and reports firing
@@ -99,6 +111,18 @@ type Config struct {
 	// resolved AlsoNotify pushes: passive (Silent) / active (Normal) / critical
 	// (Critical). Empty defaults to active.
 	NotifyLevel string
+	// Ack makes the firing AlsoNotify push repeat every AckRepeat seconds
+	// until acknowledged or AckExpire passes; the resolve cancels it. Ignored
+	// at the passive level, which the server refuses to acknowledge. Zero
+	// seconds take the server defaults.
+	Ack       bool
+	AckRepeat int
+	AckExpire int
+	// E2EKey seals the title, subtitle and body of the AlsoNotify pushes.
+	// E2EKeyError is set instead when a key is configured but unusable: the
+	// pushes then go out without the alert text (see SealNotification).
+	E2EKey      *e2e.Key
+	E2EKeyError string
 }
 
 // Bridge receives Grafana webhook alert notifications and creates PushWard
@@ -366,7 +390,20 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 	// - the core Live Activity update. Deferring also covers the no-values early
 	// return, so the user is still notified when the alert carries no values yet.
 	if isNew && b.cfg.AlsoNotify {
-		defer b.sendAlertNotification(ctx, logger, a, slug, alertname, false)
+		defer func() {
+			b.sendAlertNotification(ctx, logger, a, slug, slug, alertname, false)
+			if !b.ackEnabled() {
+				return
+			}
+			// A resolve handled while this push was still pending had nothing
+			// to cancel yet. With the alert gone, stop the repeats now.
+			b.mu.Lock()
+			_, tracked := b.active[mapKey]
+			b.mu.Unlock()
+			if !tracked {
+				b.cancelAck(ctx, logger, alertname, slug)
+			}
+		}()
 	}
 
 	// For new alerts, fetch history first so we can derive current values with
@@ -482,6 +519,14 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 	state, exists := b.active[mapKey]
 	if !exists {
 		b.mu.Unlock()
+		// Not tracked, typically because a settings save recreated the
+		// plugin while the alert was firing. The tag is derived from the
+		// alert, so the repeats of its push can still be stopped. Without
+		// the instance list there is no telling whether this was the last
+		// instance: with a contact point grouped per instance, one instance
+		// resolving after a settings save also stops the repeats of those
+		// still firing. Accepted; the next firing webhook notifies again.
+		b.cancelAck(ctx, logger, alertname, slug)
 		return
 	}
 
@@ -547,7 +592,8 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 		if !ended {
 			linkSlug = ""
 		}
-		b.sendAlertNotification(ctx, logger, a, linkSlug, alertname, true)
+		b.cancelAck(ctx, logger, alertname, slug)
+		b.sendAlertNotification(ctx, logger, a, linkSlug, slug, alertname, true)
 	}
 }
 
@@ -765,17 +811,144 @@ func buildAlertNotification(a alert, slug, alertname string, resolved bool, leve
 
 // sendAlertNotification sends a normal push notification for an alert. It is
 // best-effort: a failure is logged and recorded on the /history surface but
-// never darkens the timeline path.
-func (b *Bridge) sendAlertNotification(ctx context.Context, logger *slog.Logger, a alert, slug, alertname string, resolved bool) {
+// never darkens the timeline path. tag is the alert's activity slug, kept even
+// when slug (the deep link) is dropped; a firing push with acknowledge on
+// carries it so the resolve can stop the repeats without any stored state.
+func (b *Bridge) sendAlertNotification(ctx context.Context, logger *slog.Logger, a alert, slug, tag, alertname string, resolved bool) {
 	req := buildAlertNotification(a, slug, alertname, resolved, b.cfg.NotifyLevel)
-	if err := b.pwClient.SendNotification(ctx, req); err != nil {
-		logger.Warn("failed to send alert notification", "resolved", resolved, "error", err)
+	detail := []string{req.Level}
+
+	ack := !resolved && b.ackEnabled()
+	if ack {
+		req.Acknowledge = &pushward.NotificationAcknowledge{RepeatSeconds: b.cfg.AckRepeat, ExpireSeconds: b.cfg.AckExpire}
+		req.Tags = []string{tag}
+	}
+
+	sealed, err := SealNotification(b.cfg.E2EKey, b.cfg.E2EKeyError, &req)
+	switch {
+	case err != nil:
+		// Never send the alert in the clear once a key is configured, and
+		// never drop it either: the push still alerts, it just says nothing
+		// about the alert until the key is fixed.
+		logger.Error("cannot encrypt alert notification, sending it without the alert text", "error", err)
+		contentFree(&req, resolved)
+		detail = append(detail, "content-free: "+err.Error())
+	case sealed:
+		detail = append(detail, "encrypted")
+	}
+
+	err = b.pwClient.SendNotification(ctx, req)
+	if ack {
+		if reason := ackRefusal(err); reason != "" {
+			// Losing the repeat beats losing the alert: send it once more as
+			// a plain push.
+			logger.Warn("acknowledge refused, sending the alert without it", "reason", reason, "error", err)
+			req.Acknowledge, req.Tags = nil, nil
+			err = b.pwClient.SendNotification(ctx, req)
+			detail = append(detail, "ack refused: "+reason)
+		} else if err == nil {
+			detail = append(detail, "ack")
+		}
+	}
+	if err != nil {
+		var he *pushward.HTTPError
+		if errors.As(err, &he) && he.Code == pushward.ErrCodeNotificationEncryptionUnavailable {
+			logger.Error("organization keys cannot send encrypted notifications: remove the encryption key in the PushWard plugin settings or use a personal integration key", "error", err)
+		} else {
+			logger.Warn("failed to send alert notification", "resolved", resolved, "error", err)
+		}
 		b.recordError()
 		b.record(alertname, slug, "notify", false, err.Error())
 		return
 	}
 	b.recordPushSent()
-	b.record(alertname, slug, "notified", true, req.Level)
+	b.record(alertname, slug, "notified", true, strings.Join(detail, ", "))
+}
+
+// ackEnabled reports whether firing pushes are sent with acknowledge.
+func (b *Bridge) ackEnabled() bool {
+	return b.cfg.AlsoNotify && b.cfg.Ack && b.cfg.NotifyLevel != pushward.LevelPassive
+}
+
+// ackRefusal returns why the server refused an acknowledged send, when sending
+// it again without acknowledge can get it through: the receipt cap, receipts
+// switched off, the acknowledge rules, or the pw_ack button pushing an
+// encrypted payload past its limit. It returns "" for everything else (bad
+// key, quota, 5xx, network), where a second send would fail the same way.
+func ackRefusal(err error) string {
+	var he *pushward.HTTPError
+	if !errors.As(err, &he) {
+		return ""
+	}
+	switch he.StatusCode {
+	case http.StatusConflict:
+		if he.Code == pushward.ErrCodeNotificationReceiptLimit {
+			return he.Code
+		}
+	case http.StatusBadRequest:
+		if he.Code == pushward.ErrCodeNotificationInvalid {
+			return he.Code
+		}
+	case http.StatusUnprocessableEntity:
+		switch he.Code {
+		case "":
+			return "status 422"
+		case pushward.ErrCodeNotificationReceiptDisabled,
+			pushward.ErrCodeNotificationAnswerURLUnavailable,
+			pushward.ErrCodeNotificationEncryptedTooLarge:
+			return he.Code
+		}
+	}
+	return ""
+}
+
+// cancelAck stops the repeats of the acknowledged push sent for the alert
+// tagged tag. It has to run before the resolved push: the repeats share its
+// collapse id, so one landing after it would replace "Resolved" with the
+// firing text again. Bounded by ackCancelTimeout; a failure is only logged.
+func (b *Bridge) cancelAck(ctx context.Context, logger *slog.Logger, alertname, tag string) {
+	if !b.ackEnabled() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, ackCancelTimeout)
+	defer cancel()
+	n, err := b.pwClient.CancelNotificationReceiptsByTag(ctx, tag)
+	if err != nil {
+		logger.Warn("failed to stop acknowledge repeats", "error", err)
+		b.record(alertname, tag, "ack-cancel", false, err.Error())
+		return
+	}
+	b.record(alertname, tag, "ack-canceled", true, strconv.Itoa(n))
+}
+
+// SealNotification moves req's title, subtitle and body into an end-to-end
+// envelope under k and reports whether it did. With no key configured
+// (k nil, keyErr empty) req goes out as it is. A configured key that did not
+// parse (keyErr) or a seal that fails returns an error and leaves req
+// unchanged, so the caller decides what to send in its place.
+func SealNotification(k *e2e.Key, keyErr string, req *pushward.SendNotificationRequest) (bool, error) {
+	if keyErr != "" {
+		return false, errors.New("encryption key invalid: " + keyErr)
+	}
+	if k == nil {
+		return false, nil
+	}
+	if err := e2e.SealRequest(k, req); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// contentFree replaces the alert text of req with a fixed notice. What stays
+// is the metadata a sealed push carries readable anyway (level, thread and
+// collapse ids, deep link, acknowledge).
+func contentFree(req *pushward.SendNotificationRequest, resolved bool) {
+	req.Title = contentFreeFiring
+	if resolved {
+		req.Title = contentFreeResolved
+	}
+	req.Subtitle = ""
+	req.Body = contentFreeBody
 }
 
 // ruleUIDFor extracts the Grafana alert-rule UID from an alert's generatorURL,
@@ -816,13 +989,14 @@ func (b *Bridge) ActiveAlerts() []ActiveAlert {
 // poll or alertmanager backstop. It waits for the poller goroutine to exit
 // before returning (StopAndWait), so the caller's subsequent terminal ENDED
 // patch can't be overtaken by an in-flight steady-state ongoing patch. Returns
-// whether an entry was found.
-func (b *Bridge) Forget(slug string) bool {
+// whether an entry was found. With acknowledge on it also stops the repeats of
+// the alert's push, whose tag is the slug.
+func (b *Bridge) Forget(ctx context.Context, slug string) bool {
 	b.mu.Lock()
-	var key string
+	var key, alertname string
 	for k, st := range b.active {
 		if st.slug == slug {
-			key = k
+			key, alertname = k, st.alertname
 			break
 		}
 	}
@@ -836,6 +1010,7 @@ func (b *Bridge) Forget(slug string) bool {
 		// the activity is what closes the resurrection window.
 		b.poller.StopAndWait(slug)
 	}
+	b.cancelAck(ctx, slog.With("slug", slug), alertname, slug)
 	return key != ""
 }
 
@@ -884,23 +1059,29 @@ func (b *Bridge) startSweeper(ctx context.Context, maxAge time.Duration) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				b.sweepStale(maxAge)
+				b.sweepStale(ctx, maxAge)
 			}
 		}
 	}()
 }
 
-func (b *Bridge) sweepStale(maxAge time.Duration) {
+func (b *Bridge) sweepStale(ctx context.Context, maxAge time.Duration) {
 	now := time.Now()
+	var swept []alertState
 	b.mu.Lock()
 	for name, state := range b.active {
 		if now.Sub(state.lastSeen) > maxAge {
 			slog.Info("sweeping stale alert", "alertname", name, "slug", state.slug)
 			b.poller.Stop(state.slug)
 			delete(b.active, name)
+			swept = append(swept, *state)
 		}
 	}
 	b.mu.Unlock()
+	// Outside b.mu: each cancel is a network call.
+	for _, st := range swept {
+		b.cancelAck(ctx, slog.With("alertname", st.alertname, "slug", st.slug), st.alertname, st.slug)
+	}
 }
 
 // startAlertChecker runs a background goroutine that periodically queries the
@@ -1020,7 +1201,8 @@ func (b *Bridge) endAlertActivity(ctx context.Context, alertname string, state *
 	// the alert name (no instance/summary) - an empty alert yields the plain
 	// "Grafana"/"Resolved" notification.
 	if b.cfg.AlsoNotify {
-		b.sendAlertNotification(ctx, logger, alert{}, state.slug, alertname, true)
+		b.cancelAck(ctx, logger, alertname, state.slug)
+		b.sendAlertNotification(ctx, logger, alert{}, state.slug, state.slug, alertname, true)
 	}
 }
 
