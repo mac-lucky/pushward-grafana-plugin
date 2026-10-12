@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The Live Activity priority follows the alert's severity label: critical alerts get the highest priority (10), info alerts (and `none`) a low one (1, or the configured priority if that is lower). Warning alerts, unknown severities and alerts without the label keep the configured **Priority**. When an account runs out of Live Activity slots, PushWard keeps the higher-priority ones, so a critical alert is the last to be pushed off.
+
 ## 0.10.1
 
 - With an organization's integration key and an encryption key both set, alert push notifications were dropped, because PushWard cannot encrypt for organizations. They now arrive without the alert text, saying "Encryption is not available for organization keys", the same way an invalid key is handled. The test notification on the Connect page reports the problem rather than sending a placeholder. Remove the encryption key, or switch to a personal integration key, to get the full text back.

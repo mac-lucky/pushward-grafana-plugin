@@ -504,7 +504,10 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
           />
         </Field>
 
-        <Field label="Priority" description="Live Activity priority (0–10).">
+        <Field
+          label="Priority"
+          description="Live Activity priority (0-10) for warning alerts and alerts without a severity label. Critical alerts get 10, info alerts 1 (or this value, if lower)."
+        >
           <Input
             width={NUM_WIDTH}
             type="number"

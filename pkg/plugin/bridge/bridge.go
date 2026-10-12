@@ -34,6 +34,13 @@ const (
 
 	activeAlertCap = 500 // max concurrent tracked alerts; new entries are dropped when full
 
+	// Live Activity priorities for the severity label's ends. A warning, an
+	// unknown severity and an alert without the label keep the configured
+	// priority; PushWard evicts lower priorities first when an account runs out
+	// of activity slots.
+	priorityCritical = 10
+	priorityLow      = 1
+
 	// Alert annotation keys the bridge reads to shape the timeline.
 	annPrimarySeries = "pushward_primary_series"
 	annUnit          = "pushward_unit"
@@ -357,7 +364,7 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 	expr, refID := b.resolveQuery(ctx, a)
 
 	if isNew {
-		err := b.pwClient.CreateActivity(ctx, slug, alertname, b.cfg.Priority,
+		err := b.pwClient.CreateActivity(ctx, slug, alertname, b.priorityFor(a),
 			int(b.cfg.CleanupDelay.Seconds()), int(b.cfg.StaleTimeout.Seconds()))
 		if err != nil {
 			b.mu.Lock()
@@ -636,6 +643,19 @@ func (b *Bridge) resolveQuery(ctx context.Context, a alert) (expr, refID string)
 	}
 
 	return "", ""
+}
+
+// priorityFor is the activity priority for the alert's severity label:
+// critical gets the highest, info and none the low one (or the configured
+// priority, if that is lower), anything else the configured priority.
+func (b *Bridge) priorityFor(a alert) int {
+	switch a.Labels[b.cfg.SeverityLabel] {
+	case pushward.SeverityCritical:
+		return priorityCritical
+	case pushward.SeverityInfo, "none":
+		return min(priorityLow, b.cfg.Priority)
+	}
+	return b.cfg.Priority
 }
 
 func (b *Bridge) resolveSeverity(a alert) string {
