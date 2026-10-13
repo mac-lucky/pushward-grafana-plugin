@@ -50,6 +50,11 @@ const (
 	annUnit          = "pushward_unit"
 	annSummary       = "summary"
 
+	// LabelActivity is the alert label that overrides Config.ActivityMode for
+	// its rule: "true" gives the alert a Live Activity, "false" a push
+	// notification only. Any other value leaves the mode's default.
+	LabelActivity = "pushward_activity"
+
 	// Length caps for the optional "also send a notification" push. Subtitle/body
 	// mirror the standalone relay's Grafana notification shape; the title cap
 	// matches the server limit (notification_handler.go). Truncating the title is
@@ -77,6 +82,16 @@ const (
 	contentFreeResolved = "Grafana alert resolved"
 	contentFreeBody     = "Encryption key invalid, check the PushWard plugin settings"
 	contentFreeOrgBody  = "PushWard has not enabled encryption for organizations yet, check the PushWard plugin settings"
+)
+
+// Values of Config.ActivityMode.
+const (
+	// ActivityModeAll gives every alert a Live Activity unless its
+	// pushward_activity label is "false". The empty mode means the same.
+	ActivityModeAll = "all"
+	// ActivityModeLabeled gives a Live Activity only to alerts whose
+	// pushward_activity label is "true".
+	ActivityModeLabeled = "labeled"
 )
 
 // GrafanaResolver resolves a Grafana alert rule's PromQL and reports firing
@@ -120,6 +135,13 @@ type Config struct {
 	// Priority) and raises it when a more severe instance joins. Off: every
 	// activity gets Priority.
 	PriorityFromSeverity bool
+	// ActivityMode decides which alerts get a Live Activity: ActivityModeAll
+	// (or empty) every alert, ActivityModeLabeled only those labeled
+	// pushward_activity="true"; the label overrides the mode either way (see
+	// LabelActivity). An alert without a Live Activity still gets a push
+	// notification when it fires and when it resolves, whatever AlsoNotify
+	// says, so an alert routed here is never dropped.
+	ActivityMode string
 	// AlsoNotify sends a normal push notification (banner / Lock Screen)
 	// alongside the timeline Live Activity: one when an alert starts firing and
 	// one when it resolves. Off by default.
@@ -181,6 +203,10 @@ type alertState struct {
 	// backstop) caps to the same headline series the poller kept, instead of
 	// pruning it as an orphan on the last frame.
 	primary string
+	// notifyOnly marks an alert that has no Live Activity, only its firing and
+	// resolved pushes (Config.ActivityMode, LabelActivity). The first instance
+	// decides it for the whole alert name; slug is then just its push tag.
+	notifyOnly bool
 	// priority is what the activity was created with or last raised to. It
 	// only goes up while the alert is tracked.
 	priority     int
@@ -382,6 +408,7 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 	b.mu.Lock()
 	existing := b.active[mapKey]
 	isNew := existing == nil
+	var notifyOnly bool
 	if isNew {
 		if len(b.active) >= activeAlertCap {
 			b.mu.Unlock()
@@ -391,9 +418,11 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 			}
 			return
 		}
+		notifyOnly = !b.wantsActivity(a)
 		b.active[mapKey] = &alertState{
 			slug: slug, alertname: a.Labels["alertname"], ruleUID: b.ruleUIDFor(a),
 			seriesLabel: seriesLabel, primary: a.Annotations[annPrimarySeries],
+			notifyOnly:   notifyOnly,
 			priority:     priority,
 			lastSeen:     time.Now(),
 			fingerprints: map[string]struct{}{a.Fingerprint: {}},
@@ -401,11 +430,21 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 	} else {
 		existing.lastSeen = time.Now()
 		existing.fingerprints[a.Fingerprint] = struct{}{}
-		if priority > existing.priority {
+		notifyOnly = existing.notifyOnly
+		if !notifyOnly && priority > existing.priority {
 			raise = &priority
 		}
 	}
 	b.mu.Unlock()
+
+	if notifyOnly {
+		// No Live Activity: one push when the alert starts firing, none on
+		// the repeats, the resolve sends the other.
+		if isNew {
+			b.notifyFiring(ctx, logger, a, mapKey, slug, alertname)
+		}
+		return
+	}
 
 	expr, refID := b.resolveQuery(ctx, a)
 
@@ -445,18 +484,8 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 	// return, so the user is still notified when the alert carries no values yet.
 	if isNew && b.cfg.AlsoNotify {
 		defer func() {
-			b.sendAlertNotification(ctx, logger, a, slug, slug, alertname, false)
-			if !b.ackEnabled() {
-				return
-			}
-			// A resolve handled while this push was still pending had nothing
-			// to cancel yet. With the alert gone, stop the repeats now.
-			b.mu.Lock()
-			_, tracked := b.active[mapKey]
-			b.mu.Unlock()
-			if !tracked {
-				b.cancelAck(ctx, logger, alertname, slug)
-			}
+			b.sendAlertNotification(ctx, logger, a, slug, slug, alertname, false, b.ackEnabled())
+			b.cancelAckIfGone(ctx, logger, mapKey, alertname, slug, b.ackEnabled())
 		}()
 	}
 
@@ -549,6 +578,44 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 	}
 }
 
+// notifyFiring sends the firing push of an alert that has no Live Activity.
+// It carries no deep link: there is no activity to open, and a slug the server
+// does not know is a 422 that loses the whole push. slug still tags it, so the
+// resolve can stop its repeats.
+func (b *Bridge) notifyFiring(ctx context.Context, logger *slog.Logger, a alert, mapKey, slug, alertname string) {
+	b.sendAlertNotification(ctx, logger, a, "", slug, alertname, false, b.ackOn())
+	b.cancelAckIfGone(ctx, logger, mapKey, alertname, slug, b.ackOn())
+}
+
+// cancelAckIfGone stops the repeats of the firing push just sent for the
+// alert under mapKey when the alert is no longer tracked: a resolve handled
+// while that push was still pending had nothing to cancel yet. ack says
+// whether the push asked for acknowledge at all.
+func (b *Bridge) cancelAckIfGone(ctx context.Context, logger *slog.Logger, mapKey, alertname, slug string, ack bool) {
+	if !ack {
+		return
+	}
+	b.mu.Lock()
+	_, tracked := b.active[mapKey]
+	b.mu.Unlock()
+	if !tracked {
+		b.cancelAck(ctx, logger, alertname, slug, ack)
+	}
+}
+
+// wantsActivity reports whether a, as the first instance of its alert, gets a
+// Live Activity: its pushward_activity label when that says true or false (in
+// any case), otherwise the configured mode.
+func (b *Bridge) wantsActivity(a alert) bool {
+	switch strings.ToLower(strings.TrimSpace(a.Labels[LabelActivity])) {
+	case "true":
+		return true
+	case "false":
+		return false
+	}
+	return b.cfg.ActivityMode != ActivityModeLabeled
+}
+
 // storePriority records a priority the server accepted for the alert under
 // mapKey. It never lowers it: two webhooks raising at once may land in either
 // order.
@@ -605,7 +672,8 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 		// instance: with a contact point grouped per instance, one instance
 		// resolving after a settings save also stops the repeats of those
 		// still firing. Accepted; the next firing webhook notifies again.
-		b.cancelAck(ctx, logger, alertname, slug)
+		// The labels tell which kind of push it was, if one was sent.
+		b.cancelAck(ctx, logger, alertname, slug, b.ackFor(!b.wantsActivity(a)))
 		return
 	}
 
@@ -624,8 +692,15 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 	expr := state.expr
 	lastValues := state.lastValues
 	primary := state.primary
+	notifyOnly := state.notifyOnly
 	delete(b.active, mapKey)
 	b.mu.Unlock()
+
+	if notifyOnly {
+		b.cancelAck(ctx, logger, alertname, slug, b.ackOn())
+		b.sendAlertNotification(ctx, logger, a, "", slug, alertname, true, false)
+		return
+	}
 
 	b.poller.Stop(slug)
 
@@ -671,8 +746,8 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 		if !ended {
 			linkSlug = ""
 		}
-		b.cancelAck(ctx, logger, alertname, slug)
-		b.sendAlertNotification(ctx, logger, a, linkSlug, slug, alertname, true)
+		b.cancelAck(ctx, logger, alertname, slug, b.ackEnabled())
+		b.sendAlertNotification(ctx, logger, a, linkSlug, slug, alertname, true, false)
 	}
 }
 
@@ -926,12 +1001,12 @@ func buildAlertNotification(a alert, slug, alertname string, resolved bool, leve
 // sendAlertNotification sends a normal push notification for an alert. It is
 // best-effort: a failure is logged and recorded on the /history surface but
 // never darkens the timeline path. tag is the alert's activity slug, kept even
-// when slug (the deep link) is dropped; a firing push with acknowledge on
-// carries it so the resolve can stop the repeats without any stored state.
-func (b *Bridge) sendAlertNotification(ctx context.Context, logger *slog.Logger, a alert, slug, tag, alertname string, resolved bool) {
+// when slug (the deep link) is dropped; a firing push sent with ack carries it
+// so the resolve can stop the repeats without any stored state.
+func (b *Bridge) sendAlertNotification(ctx context.Context, logger *slog.Logger, a alert, slug, tag, alertname string, resolved, ack bool) {
 	req := buildAlertNotification(a, slug, alertname, resolved, b.cfg.NotifyLevel)
 
-	if !resolved && b.ackEnabled() {
+	if !resolved && ack {
 		req.Acknowledge = &pushward.NotificationAcknowledge{RepeatSeconds: b.cfg.AckRepeat, ExpireSeconds: b.cfg.AckExpire}
 		req.Tags = []string{tag}
 	}
@@ -998,9 +1073,24 @@ func (b *Bridge) send(ctx context.Context, logger *slog.Logger, req *pushward.Se
 	return "ack", nil
 }
 
-// ackEnabled reports whether firing pushes are sent with acknowledge.
+// ackOn reports whether acknowledge is configured at a level that allows it.
+// It is what the pushes of alerts without a Live Activity follow.
+func (b *Bridge) ackOn() bool {
+	return b.cfg.Ack && b.cfg.NotifyLevel != pushward.LevelPassive
+}
+
+// ackEnabled reports whether the firing AlsoNotify push of an alert with a
+// Live Activity is sent with acknowledge.
 func (b *Bridge) ackEnabled() bool {
-	return b.cfg.AlsoNotify && b.cfg.Ack && b.cfg.NotifyLevel != pushward.LevelPassive
+	return b.cfg.AlsoNotify && b.ackOn()
+}
+
+// ackFor is ackOn for an alert without a Live Activity, ackEnabled otherwise.
+func (b *Bridge) ackFor(notifyOnly bool) bool {
+	if notifyOnly {
+		return b.ackOn()
+	}
+	return b.ackEnabled()
 }
 
 // ackRefusal returns why the server refused an acknowledged send, when sending
@@ -1038,9 +1128,11 @@ func ackRefusal(err error) string {
 // cancelAck stops the repeats of the acknowledged push sent for the alert
 // tagged tag. It has to run before the resolved push: the repeats share its
 // collapse id, so one landing after it would replace "Resolved" with the
-// firing text again. Bounded by ackCancelTimeout; a failure is only logged.
-func (b *Bridge) cancelAck(ctx context.Context, logger *slog.Logger, alertname, tag string) {
-	if !b.ackEnabled() {
+// firing text again. ack says whether that push asked for acknowledge; without
+// it there is nothing to stop and no call is made. Bounded by
+// ackCancelTimeout; a failure is only logged.
+func (b *Bridge) cancelAck(ctx context.Context, logger *slog.Logger, alertname, tag string, ack bool) {
+	if !ack {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, ackCancelTimeout)
@@ -1103,14 +1195,17 @@ type ActiveAlert struct {
 	RuleUID   string `json:"ruleUid"`
 }
 
-// ActiveAlerts returns a snapshot of the currently tracked alerts. Used by the
-// /active resource route so the Activities page can map an activity slug back to
-// the alert identity needed to silence it.
+// ActiveAlerts returns a snapshot of the currently tracked alerts that have a
+// Live Activity. Used by the /active resource route so the Activities page can
+// map an activity slug back to the alert identity needed to silence it.
 func (b *Bridge) ActiveAlerts() []ActiveAlert {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	out := make([]ActiveAlert, 0, len(b.active))
 	for _, st := range b.active {
+		if st.notifyOnly {
+			continue
+		}
 		out = append(out, ActiveAlert{Slug: st.slug, AlertName: st.alertname, RuleUID: st.ruleUID})
 	}
 	return out
@@ -1122,12 +1217,13 @@ func (b *Bridge) ActiveAlerts() []ActiveAlert {
 // before returning (StopAndWait), so the caller's subsequent terminal ENDED
 // patch can't be overtaken by an in-flight steady-state ongoing patch. Returns
 // whether an entry was found. With acknowledge on it also stops the repeats of
-// the alert's push, whose tag is the slug.
+// the alert's push, whose tag is the slug. An alert without a Live Activity is
+// never matched: the activity being ended is not its own.
 func (b *Bridge) Forget(ctx context.Context, slug string) bool {
 	b.mu.Lock()
 	var key, alertname string
 	for k, st := range b.active {
-		if st.slug == slug {
+		if st.slug == slug && !st.notifyOnly {
 			key, alertname = k, st.alertname
 			break
 		}
@@ -1142,7 +1238,7 @@ func (b *Bridge) Forget(ctx context.Context, slug string) bool {
 		// the activity is what closes the resurrection window.
 		b.poller.StopAndWait(slug)
 	}
-	b.cancelAck(ctx, slog.With("slug", slug), alertname, slug)
+	b.cancelAck(ctx, slog.With("slug", slug), alertname, slug, b.ackEnabled())
 	return key != ""
 }
 
@@ -1212,7 +1308,7 @@ func (b *Bridge) sweepStale(ctx context.Context, maxAge time.Duration) {
 	b.mu.Unlock()
 	// Outside b.mu: each cancel is a network call.
 	for _, st := range swept {
-		b.cancelAck(ctx, slog.With("alertname", st.alertname, "slug", st.slug), st.alertname, st.slug)
+		b.cancelAck(ctx, slog.With("alertname", st.alertname, "slug", st.slug), st.alertname, st.slug, b.ackFor(st.notifyOnly))
 	}
 }
 
@@ -1285,6 +1381,15 @@ func (b *Bridge) checkAlertStates(ctx context.Context) {
 			continue // resolved by webhook, or re-fired during the check
 		}
 
+		if e.state.notifyOnly {
+			// No activity to end: send the resolved push the missed webhook
+			// would have, with only the alert name to go on.
+			logger := slog.With("alertname", e.state.alertname, "slug", e.state.slug)
+			b.cancelAck(ctx, logger, e.state.alertname, e.state.slug, b.ackOn())
+			b.sendAlertNotification(ctx, logger, alert{}, "", e.state.slug, e.state.alertname, true, false)
+			continue
+		}
+
 		b.poller.Stop(e.state.slug)
 		b.endAlertActivity(ctx, e.state.alertname, &e.state)
 	}
@@ -1333,8 +1438,8 @@ func (b *Bridge) endAlertActivity(ctx context.Context, alertname string, state *
 	// the alert name (no instance/summary) - an empty alert yields the plain
 	// "Grafana"/"Resolved" notification.
 	if b.cfg.AlsoNotify {
-		b.cancelAck(ctx, logger, alertname, state.slug)
-		b.sendAlertNotification(ctx, logger, alert{}, state.slug, state.slug, alertname, true)
+		b.cancelAck(ctx, logger, alertname, state.slug, b.ackEnabled())
+		b.sendAlertNotification(ctx, logger, alert{}, state.slug, state.slug, alertname, true, false)
 	}
 }
 

@@ -45,6 +45,7 @@ export type AppPluginSettings = {
   defaultSeverity?: string;
   priority?: number;
   priorityFromSeverity?: boolean;
+  activityMode?: string;
   historyWindow?: string;
   pollInterval?: string;
   cleanupDelay?: string;
@@ -67,6 +68,7 @@ const DEFAULTS: Required<AppPluginSettings> = {
   defaultSeverity: 'warning',
   priority: 5,
   priorityFromSeverity: false,
+  activityMode: 'all',
   historyWindow: '30m',
   pollInterval: '30s',
   cleanupDelay: '15m',
@@ -85,6 +87,13 @@ const DEFAULTS: Required<AppPluginSettings> = {
 const SCALE_OPTIONS: Array<ComboboxOption<string>> = [
   { label: 'Linear', value: 'linear' },
   { label: 'Logarithmic', value: 'logarithmic' },
+];
+
+// Which alerts get a timeline Live Activity. The backend reads anything but
+// 'labeled' as 'all'.
+const ACTIVITY_MODE_OPTIONS: Array<{ label: string; value: string }> = [
+  { label: 'All alerts', value: 'all' },
+  { label: 'Only labeled alerts', value: 'labeled' },
 ];
 
 // Push-notification interruption level, mapped to the PushWard server's own
@@ -188,6 +197,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     defaultSeverity: jsonData?.defaultSeverity ?? DEFAULTS.defaultSeverity,
     priority: jsonData?.priority ?? DEFAULTS.priority,
     priorityFromSeverity: jsonData?.priorityFromSeverity ?? DEFAULTS.priorityFromSeverity,
+    activityMode: jsonData?.activityMode === 'labeled' ? 'labeled' : DEFAULTS.activityMode,
     historyWindow: jsonData?.historyWindow ?? DEFAULTS.historyWindow,
     pollInterval: jsonData?.pollInterval ?? DEFAULTS.pollInterval,
     cleanupDelay: jsonData?.cleanupDelay ?? DEFAULTS.cleanupDelay,
@@ -213,6 +223,9 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
 
   const isSubmitDisabled = !state.apiUrl;
   const isSilent = state.notifyLevel === 'passive';
+  // The push settings apply whenever a push can go out: alongside a Live
+  // Activity (alsoNotify) or in place of one (only labeled alerts get one).
+  const showNotifyOptions = state.alsoNotify || state.activityMode === 'labeled';
 
   // Surface the backend's parse/validate result for the saved widget config, so
   // an error only the Go validator catches lands on the widgets editor here
@@ -362,6 +375,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         defaultSeverity: state.defaultSeverity,
         priority: state.priority,
         priorityFromSeverity: state.priorityFromSeverity,
+        activityMode: state.activityMode,
         historyWindow: state.historyWindow,
         pollInterval: state.pollInterval,
         cleanupDelay: state.cleanupDelay,
@@ -553,8 +567,20 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         </Field>
 
         <Field
+          label="Live Activities"
+          description='Which alerts get a timeline Live Activity. A pushward_activity="true" or "false" label on an alert rule overrides this; alerts without a Live Activity get a push notification when they fire and when they resolve.'
+        >
+          <RadioButtonGroup
+            data-testid={testIds.appConfig.activityMode}
+            options={ACTIVITY_MODE_OPTIONS}
+            value={state.activityMode}
+            onChange={(v) => setState({ ...state, activityMode: v ?? DEFAULTS.activityMode })}
+          />
+        </Field>
+
+        <Field
           label="Also send a push notification"
-          description="Also deliver a normal push notification (banner / Lock Screen) when an alert fires and resolves, in addition to the timeline Live Activity."
+          description="Also deliver a normal push notification (banner / Lock Screen) when an alert with a Live Activity fires and resolves, in addition to the activity."
         >
           <Switch
             data-testid={testIds.appConfig.alsoNotify}
@@ -563,7 +589,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
           />
         </Field>
 
-        {state.alsoNotify && (
+        {showNotifyOptions && (
           <>
             <Field
               label="Notification priority"

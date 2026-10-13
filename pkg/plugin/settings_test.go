@@ -100,3 +100,22 @@ func TestPriorityFromSeveritySetting(t *testing.T) {
 		}
 	}
 }
+
+func TestActivityModeSettings(t *testing.T) {
+	cases := []struct {
+		name, jsonData, want string
+	}{
+		{"default", `{}`, "all"},
+		{"all", `{"activityMode":"all"}`, "all"},
+		{"labeled", `{"activityMode":"labeled"}`, "labeled"},
+		{"labeled in another case", `{"activityMode":" Labeled "}`, "labeled"},
+		{"unknown reads as all", `{"activityMode":"some"}`, "all"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := loadSettings(t, tc.jsonData, nil).ActivityMode; got != tc.want {
+				t.Errorf("ActivityMode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -118,6 +118,7 @@ func NewApp(ctx context.Context, settings backend.AppInstanceSettings) (instance
 		Scale:                s.Scale,
 		Decimals:             &s.Decimals,
 		PriorityFromSeverity: s.PriorityFromSeverity,
+		ActivityMode:         s.ActivityMode,
 		AlsoNotify:           s.AlsoNotify,
 		NotifyLevel:          s.NotifyLevel,
 		Ack:                  s.Ack,

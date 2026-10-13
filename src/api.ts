@@ -54,6 +54,9 @@ export interface ConfigResponse {
   severityLabel: string;
   defaultSeverity: string;
   priority: number;
+  // Which alerts get a Live Activity: 'all' or 'labeled' (only alerts labeled
+  // pushward_activity="true").
+  activityMode: string;
   historyWindow: string;
   pollInterval: string;
   cleanupDelay: string;

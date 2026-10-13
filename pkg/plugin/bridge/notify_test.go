@@ -625,7 +625,7 @@ func TestAckRefusedResendsWithoutAck(t *testing.T) {
 			b.deliveryLog = dl
 			slug := makeSlug("HighCPU")
 
-			b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false)
+			b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false, b.ackEnabled())
 
 			notifs, _ := m.requests(t, http.MethodPost, "/notifications")
 			if len(notifs) != 2 {
@@ -684,7 +684,7 @@ func TestAckNoResendWhenKeyRejected(t *testing.T) {
 			b := newTestBridge(t, m.url, nil, ackConfig())
 			slug := makeSlug("HighCPU")
 
-			b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false)
+			b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false, b.ackEnabled())
 
 			if notifs, _ := m.requests(t, http.MethodPost, "/notifications"); len(notifs) != 1 {
 				t.Errorf("got %d sends after a %d, want 1 (no resend)", len(notifs), status)
@@ -724,7 +724,7 @@ func TestAckCanceledOnEveryEnd(t *testing.T) {
 			dl := &recLog{}
 			b.deliveryLog = dl
 			// The firing push, so there is a receipt to cancel.
-			b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false)
+			b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false, b.ackEnabled())
 
 			tc.end(b)
 
@@ -787,7 +787,7 @@ func TestSealedNotificationOpensWithKey(t *testing.T) {
 	b.deliveryLog = dl
 	slug := makeSlug("HighCPU")
 
-	b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false)
+	b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false, b.ackEnabled())
 
 	notifs, _ := m.requests(t, http.MethodPost, "/notifications")
 	if len(notifs) != 1 {
@@ -842,7 +842,7 @@ func TestInvalidKeySendsContentFreeAlert(t *testing.T) {
 				a.Labels["instance"] = "node-1"
 			}
 
-			b.sendAlertNotification(context.Background(), slog.Default(), a, slug, slug, "HighCPU", resolved)
+			b.sendAlertNotification(context.Background(), slog.Default(), a, slug, slug, "HighCPU", resolved, b.ackEnabled())
 
 			notifs, _ := m.requests(t, http.MethodPost, "/notifications")
 			if len(notifs) != 1 {
@@ -996,7 +996,7 @@ func TestOrgKeySendsContentFreeAlert(t *testing.T) {
 				a = resolvedAlert()
 			}
 
-			b.sendAlertNotification(context.Background(), slog.Default(), a, slug, slug, "HighCPU", resolved)
+			b.sendAlertNotification(context.Background(), slog.Default(), a, slug, slug, "HighCPU", resolved, b.ackEnabled())
 
 			bodies := sent()
 			if len(bodies) != 2 {
@@ -1058,7 +1058,7 @@ func TestOrgKeySendsContentFreeAlert(t *testing.T) {
 			b.deliveryLog = dl
 			slug := makeSlug("HighCPU")
 
-			b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false)
+			b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false, b.ackEnabled())
 
 			if bodies := sent(); len(bodies) != 1 {
 				t.Fatalf("got %d sends, want only the sealed one: %v", len(bodies), bodies)
@@ -1091,7 +1091,7 @@ func TestOrgKeySendsContentFreeAlert(t *testing.T) {
 		b.deliveryLog = dl
 		slug := makeSlug("HighCPU")
 
-		b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false)
+		b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false, b.ackEnabled())
 
 		bodies := sent()
 		if len(bodies) != 3 {

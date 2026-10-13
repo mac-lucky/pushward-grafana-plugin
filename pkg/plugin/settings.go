@@ -10,6 +10,7 @@ import (
 	"github.com/mac-lucky/pushward-integrations/shared/e2e"
 	"github.com/mac-lucky/pushward-integrations/shared/pushward"
 
+	"github.com/mac-lucky/pushward-grafana-plugin/pkg/plugin/bridge"
 	"github.com/mac-lucky/pushward-grafana-plugin/pkg/plugin/widgets"
 )
 
@@ -84,6 +85,11 @@ type Settings struct {
 	// iOS ranks them in the Dynamic Island and Smart Stack.
 	PriorityFromSeverity bool
 
+	// ActivityMode is which alerts get a Live Activity: bridge.ActivityModeAll
+	// (the default) or bridge.ActivityModeLabeled, only those labeled
+	// pushward_activity="true". Any other value reads as the default.
+	ActivityMode string
+
 	// AlsoNotify, when true, sends a normal push notification (banner / Lock
 	// Screen) alongside the timeline Live Activity when an alert fires and when
 	// it resolves. Off by default: the Live Activity alone is the base behavior.
@@ -133,6 +139,7 @@ type rawJSONData struct {
 	DefaultSeverity string `json:"defaultSeverity"`
 	Priority        *int   `json:"priority"`
 	PrioFromSev     *bool  `json:"priorityFromSeverity"`
+	ActivityMode    string `json:"activityMode"`
 	HistoryWindow   string `json:"historyWindow"`
 	PollInterval    string `json:"pollInterval"`
 	CleanupDelay    string `json:"cleanupDelay"`
@@ -174,6 +181,7 @@ func LoadSettings(s backend.AppInstanceSettings) (*Settings, error) {
 		Smoothing:       defaultSmoothing,
 		Scale:           firstNonEmpty(raw.Scale, defaultScale),
 		Decimals:        defaultDecimals,
+		ActivityMode:    bridge.ActivityModeAll,
 		AlsoNotify:      defaultAlsoNotify,
 		NotifyLevel:     defaultNotifyLevel,
 		AckRepeat:       defaultAckRepeat,
@@ -184,6 +192,9 @@ func LoadSettings(s backend.AppInstanceSettings) (*Settings, error) {
 	}
 	if raw.PrioFromSev != nil {
 		out.PriorityFromSeverity = *raw.PrioFromSev
+	}
+	if strings.EqualFold(strings.TrimSpace(raw.ActivityMode), bridge.ActivityModeLabeled) {
+		out.ActivityMode = bridge.ActivityModeLabeled
 	}
 	if raw.Smoothing != nil {
 		out.Smoothing = *raw.Smoothing

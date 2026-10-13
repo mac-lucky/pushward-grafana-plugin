@@ -17,6 +17,7 @@ export const testIds = {
     smoothing: 'data-testid ac-smoothing',
     scale: 'data-testid ac-scale',
     decimals: 'data-testid ac-decimals',
+    activityMode: 'data-testid ac-activity-mode',
     alsoNotify: 'data-testid ac-also-notify',
     notifyLevel: 'data-testid ac-notify-level',
     ackEnabled: 'data-testid ac-ack-enabled',

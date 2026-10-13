@@ -112,6 +112,21 @@ describe('Components/AppConfig', () => {
     expect(screen.getByText(/not available at silent priority/i)).toBeInTheDocument();
   });
 
+  test('live activities default to all alerts; only labeled alerts shows the push settings', () => {
+    const { unmount } = render(<AppConfig plugin={props.plugin} query={props.query} />);
+    expect(screen.getByTestId(testIds.appConfig.activityMode)).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'All alerts' })).toBeChecked();
+    expect(screen.queryByTestId(testIds.appConfig.ackEnabled)).not.toBeInTheDocument();
+    unmount();
+
+    const labeled = { meta: { ...props.plugin.meta, jsonData: { activityMode: 'labeled' } } };
+    // @ts-expect-error - addConfigPage()/setChannelSupport() aren't needed for this test
+    render(<AppConfig plugin={labeled} query={props.query} />);
+    expect(screen.getByRole('radio', { name: 'Only labeled alerts' })).toBeChecked();
+    expect(screen.getByTestId(testIds.appConfig.notifyLevel)).toBeInTheDocument();
+    expect(screen.getByTestId(testIds.appConfig.ackEnabled)).toBeInTheDocument();
+  });
+
   test('priority from severity is off by default and rewords the priority field when on', () => {
     const { unmount } = render(<AppConfig plugin={props.plugin} query={props.query} />);
     expect(screen.getByTestId(testIds.appConfig.priorityFromSeverity)).not.toBeChecked();

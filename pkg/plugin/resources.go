@@ -138,6 +138,7 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"severityLabel":    s.SeverityLabel,
 		"defaultSeverity":  s.DefaultSeverity,
 		"priority":         s.Priority,
+		"activityMode":     s.ActivityMode,
 		"historyWindow":    s.HistoryWindow.String(),
 		"pollInterval":     s.PollInterval.String(),
 		"cleanupDelay":     s.CleanupDelay.String(),

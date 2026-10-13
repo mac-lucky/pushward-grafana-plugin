@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- New setting **Live Activities**: **All alerts** (the default, same as before) or **Only labeled alerts**. With the second, only alert rules labeled `pushward_activity="true"` get a timeline Live Activity. A `pushward_activity="false"` label keeps a rule out of Live Activities under **All alerts** too. Alerts without a Live Activity still reach you as a push notification when they fire and when they resolve, even with **Also send a push notification** off, so you can route everything to PushWard and keep the Lock Screen for the alerts you care about. The push follows the **Notification priority** and **Repeat until acknowledged** settings, which the Configuration page now also shows when **Only labeled alerts** is picked.
+
 ## 0.11.1
 
 - Encryption works with an organization's integration key since PushWard turned it on for organizations on 2026-10-13, and older plugin versions pick that up too. Paste the organization's encryption key, which your admin creates and hands out, not the one under your own Settings in the app. Members add it in PushWard 1.18 or later under Settings > End-to-End Encryption > Organization Keys; a member without it sees the push locked on 1.17 or later, on older apps as a placeholder. What changes in this release is the wording if PushWard ever switches it off again: alerts still arrive without their text, as since 0.10.1, but they and the test notification on the Connect page now say "PushWard has not enabled encryption for organizations yet" instead of claiming organization keys cannot encrypt.
