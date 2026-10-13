@@ -306,8 +306,8 @@ func TestTestNotificationOrgKey(t *testing.T) {
 	}
 	app, _, sent := newTestAppWith(t, map[string]string{"e2eKey": testE2EKey}, encrypted)
 	resp := callResourceBody(t, app, http.MethodPost, "test", []byte(`{"kind":"notification"}`))
-	if resp.Status != http.StatusBadRequest || !strings.Contains(string(resp.Body), "organization") {
-		t.Errorf("test with an organization key = %d %s, want 400 naming organization keys", resp.Status, resp.Body)
+	if resp.Status != http.StatusBadRequest || !strings.Contains(string(resp.Body), "not enabled encryption for organizations") {
+		t.Errorf("test with an organization key = %d %s, want 400 saying organization encryption is off", resp.Status, resp.Body)
 	}
 	// The test reports the problem; it does not fall back to a content-free send.
 	if n := len(sent()); n != 1 {

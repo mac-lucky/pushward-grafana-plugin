@@ -414,8 +414,10 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
             <>
               Optional. Encrypts the title, subtitle and body of the push notifications this plugin sends, so only your
               devices holding the key can read them; a device without it, or on a PushWard app older than 1.17, shows a
-              placeholder. Create it in the PushWard app under Settings &gt; End-to-End Encryption. Live Activities are
-              not encrypted, and an organization&apos;s integration key cannot send encrypted notifications.
+              placeholder. Create it in the PushWard app under Settings &gt; End-to-End Encryption. With an
+              organization&apos;s integration key, paste the organization&apos;s key from your admin instead; members
+              add it in PushWard 1.18 or later under Settings &gt; End-to-End Encryption &gt; Organization Keys. Live
+              Activities are not encrypted.
               {state.isE2EKeySet && state.e2eKeyId && (
                 <>
                   {' '}

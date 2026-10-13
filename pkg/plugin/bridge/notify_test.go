@@ -974,7 +974,8 @@ func problemServer(t *testing.T, answer func(body map[string]any) (int, string))
 }
 
 func TestOrgKeySendsContentFreeAlert(t *testing.T) {
-	// An organization key gets 422 for every encrypted send.
+	// An organization key gets 422 for every encrypted send while PushWard
+	// has encryption for organizations turned off.
 	orgKey := func(body map[string]any) (int, string) {
 		if _, ok := body["encrypted"]; ok {
 			return http.StatusUnprocessableEntity, pushward.ErrCodeNotificationEncryptionUnavailable
@@ -1027,8 +1028,8 @@ func TestOrgKeySendsContentFreeAlert(t *testing.T) {
 				}
 			}
 			e := dl.find("notified")
-			if e == nil || !e.ok || !strings.Contains(e.detail, "organization keys") {
-				t.Errorf("delivery log notified = %+v, want ok noting organization keys", e)
+			if e == nil || !e.ok || !strings.Contains(e.detail, "not enabled encryption for organizations") {
+				t.Errorf("delivery log notified = %+v, want ok noting organization encryption is off", e)
 			}
 			if f := dl.find("notify"); f != nil {
 				t.Errorf("delivery log recorded a failure %+v, want the alert delivered", f)

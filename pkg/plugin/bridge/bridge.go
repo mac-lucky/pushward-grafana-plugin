@@ -76,7 +76,7 @@ const (
 	contentFreeFiring   = "Grafana alert firing"
 	contentFreeResolved = "Grafana alert resolved"
 	contentFreeBody     = "Encryption key invalid, check the PushWard plugin settings"
-	contentFreeOrgBody  = "Encryption is not available for organization keys, check the PushWard plugin settings"
+	contentFreeOrgBody  = "PushWard has not enabled encryption for organizations yet, check the PushWard plugin settings"
 )
 
 // GrafanaResolver resolves a Grafana alert rule's PromQL and reports firing
@@ -954,12 +954,12 @@ func (b *Bridge) sendAlertNotification(ctx context.Context, logger *slog.Logger,
 	ackNote, err := b.send(ctx, logger, &req)
 	var he *pushward.HTTPError
 	if sealed && errors.As(err, &he) && he.Code == pushward.ErrCodeNotificationEncryptionUnavailable {
-		// The key belongs to an organization, which cannot send encrypted.
-		// Same rule as an invalid key: the alert still goes out, without
-		// its text.
-		logger.Error("organization keys cannot send encrypted notifications, sending the alert without its text: remove the encryption key in the PushWard plugin settings or use a personal integration key", "error", err)
+		// The key belongs to an organization and PushWard has encryption
+		// for organizations turned off. Same rule as an invalid key: the
+		// alert still goes out, without its text.
+		logger.Error("PushWard has not enabled encrypted notifications for organizations yet, sending the alert without its text: remove the encryption key in the PushWard plugin settings or use a personal integration key until it does", "error", err)
 		contentFree(&req, resolved, contentFreeOrgBody)
-		textNote = "content-free: encryption is not available for organization keys"
+		textNote = "content-free: PushWard has not enabled encryption for organizations yet"
 		ackNote, err = b.send(ctx, logger, &req)
 	}
 	if err != nil {

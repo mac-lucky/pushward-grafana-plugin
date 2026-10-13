@@ -265,7 +265,7 @@ func (a *App) handleTest(w http.ResponseWriter, r *http.Request) {
 	// send: its job is to show what is wrong with the setup.
 	var he *pushward.HTTPError
 	if errors.As(err, &he) && he.Code == pushward.ErrCodeNotificationEncryptionUnavailable {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "This integration key belongs to an organization, and organization keys cannot send encrypted notifications. Remove the encryption key, or use a personal integration key. Until then alert pushes arrive without their text."})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "This integration key belongs to an organization, and PushWard has not enabled encryption for organizations yet. Until it does, remove the encryption key or use a personal integration key; otherwise alert pushes arrive without their text."})
 		return
 	}
 	if err != nil {
