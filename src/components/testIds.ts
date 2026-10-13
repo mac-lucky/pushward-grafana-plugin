@@ -9,6 +9,7 @@ export const testIds = {
     severityLabel: 'data-testid ac-severity-label',
     defaultSeverity: 'data-testid ac-default-severity',
     priority: 'data-testid ac-priority',
+    priorityFromSeverity: 'data-testid ac-priority-from-severity',
     historyWindow: 'data-testid ac-history-window',
     pollInterval: 'data-testid ac-poll-interval',
     cleanupDelay: 'data-testid ac-cleanup-delay',

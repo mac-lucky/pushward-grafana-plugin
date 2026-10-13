@@ -34,12 +34,16 @@ const (
 
 	activeAlertCap = 500 // max concurrent tracked alerts; new entries are dropped when full
 
-	// Live Activity priorities for the severity label's ends. A warning, an
-	// unknown severity and an alert without the label keep the configured
-	// priority; PushWard evicts lower priorities first when an account runs out
-	// of activity slots.
+	// Live Activity priorities for the severity label's ends, used when
+	// Config.PriorityFromSeverity is on. A warning, an unknown severity and an
+	// alert without the label keep the configured priority; PushWard evicts
+	// lower priorities first when an account runs out of activity slots.
 	priorityCritical = 10
 	priorityLow      = 1
+
+	// severityNone is the severity some rule sets give alerts that page no one
+	// (kube-prometheus' Watchdog, InfoInhibitor). The bridge treats it as info.
+	severityNone = "none"
 
 	// Alert annotation keys the bridge reads to shape the timeline.
 	annPrimarySeries = "pushward_primary_series"
@@ -111,6 +115,11 @@ type Config struct {
 	Smoothing       *bool
 	Scale           string
 	Decimals        *int
+	// PriorityFromSeverity derives the activity priority from the severity
+	// label (critical 10, info and none 1 or Priority if lower, the rest
+	// Priority) and raises it when a more severe instance joins. Off: every
+	// activity gets Priority.
+	PriorityFromSeverity bool
 	// AlsoNotify sends a normal push notification (banner / Lock Screen)
 	// alongside the timeline Live Activity: one when an alert starts firing and
 	// one when it resolves. Off by default.
@@ -171,7 +180,10 @@ type alertState struct {
 	// Stored so the terminal ENDED update (incl. the annotation-free alertmanager
 	// backstop) caps to the same headline series the poller kept, instead of
 	// pruning it as an orphan on the last frame.
-	primary      string
+	primary string
+	// priority is what the activity was created with or last raised to. It
+	// only goes up while the alert is tracked.
+	priority     int
 	lastSeen     time.Time
 	fingerprints map[string]struct{}
 	// lastValues records the series keys + values most recently sent to the
@@ -304,10 +316,11 @@ func (b *Bridge) ProcessWebhook(_ context.Context, rawJSON []byte) error {
 		// still be interrupted on shutdown rather than blocking indefinitely.
 		ctx, cancel := context.WithTimeout(context.Background(), webhookTimeout)
 		defer cancel()
+		priorities := b.payloadPriorities(payload.Alerts)
 		for _, a := range payload.Alerts {
 			switch a.Status {
 			case alertStatusFiring:
-				b.handleFiring(ctx, a)
+				b.handleFiring(ctx, a, priorities)
 			case alertStatusResolved:
 				b.handleResolved(ctx, a)
 			}
@@ -316,24 +329,53 @@ func (b *Bridge) ProcessWebhook(_ context.Context, rawJSON []byte) error {
 	return nil
 }
 
-func (b *Bridge) handleFiring(ctx context.Context, a alert) {
+// payloadPriorities maps the key of each firing alert in one webhook to the
+// highest priority among that key's alerts, so an activity (re)created from a
+// mixed group starts at its most severe instance rather than at whichever one
+// Grafana listed first. nil when the priority does not follow the severity.
+func (b *Bridge) payloadPriorities(alerts []alert) map[string]int {
+	if !b.cfg.PriorityFromSeverity {
+		return nil
+	}
+	out := make(map[string]int)
+	for _, a := range alerts {
+		if a.Status != alertStatusFiring {
+			continue
+		}
+		k, p := alertKey(a), b.priorityFor(a)
+		if cur, ok := out[k]; ok {
+			p = max(p, cur)
+		}
+		out[k] = p
+	}
+	return out
+}
+
+// handleFiring processes one firing alert. priorities is the payload's
+// per-key maximum from payloadPriorities; nil leaves each alert at its own.
+func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[string]int) {
 	if a.Fingerprint == "" {
 		slog.Warn("alert has empty fingerprint, skipping")
 		return
 	}
 
+	mapKey := alertKey(a)
 	alertname := a.Labels["alertname"]
-	// When alertname is empty, use the fingerprint as the map key to avoid
-	// collapsing unrelated anonymous alerts into a single activity.
-	mapKey := alertname
-	if mapKey == "" {
-		mapKey = a.Fingerprint
+	if alertname == "" {
 		alertname = "Grafana Alert"
 	}
 	slug := makeSlug(mapKey)
 	logger := slog.With("alertname", alertname, "slug", slug, "fingerprint", a.Fingerprint)
 
 	seriesLabel := a.Annotations["pushward_series_label"]
+
+	priority := b.priorityFor(a)
+	if p, ok := priorities[mapKey]; ok {
+		priority = max(priority, p)
+	}
+	// raise is set when a tracked activity has to go up to a more severe
+	// instance's priority. Stored only once the server has taken it.
+	var raise *int
 
 	// Check-and-mark: reserve the slot before releasing the lock to prevent
 	// duplicate creates from concurrent webhooks.
@@ -352,19 +394,23 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 		b.active[mapKey] = &alertState{
 			slug: slug, alertname: a.Labels["alertname"], ruleUID: b.ruleUIDFor(a),
 			seriesLabel: seriesLabel, primary: a.Annotations[annPrimarySeries],
+			priority:     priority,
 			lastSeen:     time.Now(),
 			fingerprints: map[string]struct{}{a.Fingerprint: {}},
 		}
 	} else {
 		existing.lastSeen = time.Now()
 		existing.fingerprints[a.Fingerprint] = struct{}{}
+		if priority > existing.priority {
+			raise = &priority
+		}
 	}
 	b.mu.Unlock()
 
 	expr, refID := b.resolveQuery(ctx, a)
 
 	if isNew {
-		err := b.pwClient.CreateActivity(ctx, slug, alertname, b.priorityFor(a),
+		err := b.pwClient.CreateActivity(ctx, slug, alertname, priority,
 			int(b.cfg.CleanupDelay.Seconds()), int(b.cfg.StaleTimeout.Seconds()))
 		if err != nil {
 			b.mu.Lock()
@@ -442,6 +488,16 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 				logger.Info("poller started (will seed on first values)")
 			}
 		}
+		if raise != nil {
+			// No timeline update to carry the new priority, so patch it alone.
+			if err := b.pwClient.PatchActivity(ctx, slug, pushward.PatchRequest{Priority: raise}); err != nil {
+				logger.Error("failed to raise activity priority", "priority", *raise, "error", err)
+				b.recordError()
+				b.record(alertname, slug, "priority", false, err.Error())
+				return
+			}
+			b.storePriority(mapKey, *raise)
+		}
 		return
 	}
 
@@ -457,8 +513,9 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 	content.History = history
 
 	err := b.pwClient.UpdateActivity(ctx, slug, pushward.UpdateRequest{
-		State:   pushward.StateOngoing,
-		Content: content,
+		State:    pushward.StateOngoing,
+		Content:  content,
+		Priority: raise,
 	})
 	if err != nil {
 		logger.Error("failed to update activity", "error", err)
@@ -468,6 +525,10 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 	}
 	b.recordPushSent()
 	b.record(alertname, slug, "firing", true, content.State)
+
+	if raise != nil {
+		b.storePriority(mapKey, *raise)
+	}
 
 	// Only seed lastValues from the initial history fetch — values from the
 	// webhook payload use Grafana ref-ID keys that differ from the poller's
@@ -485,6 +546,17 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert) {
 		if b.startPollerIfTracked(mapKey, slug, expr, seriesLabel, primary, nil) {
 			logger.Info("poller started")
 		}
+	}
+}
+
+// storePriority records a priority the server accepted for the alert under
+// mapKey. It never lowers it: two webhooks raising at once may land in either
+// order.
+func (b *Bridge) storePriority(mapKey string, priority int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if state, ok := b.active[mapKey]; ok {
+		state.priority = max(state.priority, priority)
 	}
 }
 
@@ -514,10 +586,9 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 		return
 	}
 
+	mapKey := alertKey(a)
 	alertname := a.Labels["alertname"]
-	mapKey := alertname
-	if mapKey == "" {
-		mapKey = a.Fingerprint
+	if alertname == "" {
 		alertname = "Grafana Alert"
 	}
 	slug := makeSlug(mapKey)
@@ -645,25 +716,47 @@ func (b *Bridge) resolveQuery(ctx context.Context, a alert) (expr, refID string)
 	return "", ""
 }
 
-// priorityFor is the activity priority for the alert's severity label:
+// alertKey is the active-map key of a: its alertname, or for an anonymous
+// alert its fingerprint, so unrelated anonymous alerts do not collapse into a
+// single activity.
+func alertKey(a alert) string {
+	if name := a.Labels["alertname"]; name != "" {
+		return name
+	}
+	return a.Fingerprint
+}
+
+// labelSeverity reads the severity label in any case and returns critical,
+// warning or info (none counts as info), or "" for a missing or unknown value.
+func (b *Bridge) labelSeverity(a alert) string {
+	switch sev := strings.ToLower(a.Labels[b.cfg.SeverityLabel]); sev {
+	case pushward.SeverityCritical, pushward.SeverityWarning, pushward.SeverityInfo:
+		return sev
+	case severityNone:
+		return pushward.SeverityInfo
+	}
+	return ""
+}
+
+// priorityFor is the activity priority for a. With PriorityFromSeverity on,
 // critical gets the highest, info and none the low one (or the configured
 // priority, if that is lower), anything else the configured priority.
 func (b *Bridge) priorityFor(a alert) int {
-	switch a.Labels[b.cfg.SeverityLabel] {
+	if !b.cfg.PriorityFromSeverity {
+		return b.cfg.Priority
+	}
+	switch b.labelSeverity(a) {
 	case pushward.SeverityCritical:
 		return priorityCritical
-	case pushward.SeverityInfo, "none":
+	case pushward.SeverityInfo:
 		return min(priorityLow, b.cfg.Priority)
 	}
 	return b.cfg.Priority
 }
 
 func (b *Bridge) resolveSeverity(a alert) string {
-	if sev, ok := a.Labels[b.cfg.SeverityLabel]; ok {
-		switch sev {
-		case pushward.SeverityCritical, pushward.SeverityWarning, pushward.SeverityInfo:
-			return sev
-		}
+	if sev := b.labelSeverity(a); sev != "" {
+		return sev
 	}
 	return b.cfg.DefaultSeverity
 }

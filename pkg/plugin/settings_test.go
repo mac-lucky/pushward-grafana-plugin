@@ -91,3 +91,12 @@ func TestAckLevelDefaultIsNotPassive(t *testing.T) {
 		t.Errorf("level/ack = %q/%v, want active/true", s.NotifyLevel, s.Ack)
 	}
 }
+
+func TestPriorityFromSeveritySetting(t *testing.T) {
+	cases := map[string]bool{`{}`: false, `{"priorityFromSeverity":false}`: false, `{"priorityFromSeverity":true}`: true}
+	for jsonData, want := range cases {
+		if got := loadSettings(t, jsonData, nil).PriorityFromSeverity; got != want {
+			t.Errorf("%s: PriorityFromSeverity = %v, want %v", jsonData, got, want)
+		}
+	}
+}

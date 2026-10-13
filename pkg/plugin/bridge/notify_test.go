@@ -109,7 +109,7 @@ func TestAlsoNotifyFiringSendsActiveNotification(t *testing.T) {
 	s := newStubServer(t)
 	b := newTestBridge(t, s.URL, nil, Config{AlsoNotify: true, SeverityLabel: "severity", DefaultSeverity: "warning"})
 
-	b.handleFiring(context.Background(), firingAlert())
+	b.handleFiring(context.Background(), firingAlert(), nil)
 
 	if s.find(http.MethodPost, "/activities") == nil {
 		t.Error("expected a POST /activities for the Live Activity")
@@ -143,7 +143,7 @@ func TestAlsoNotifyFiringUsesConfiguredLevel(t *testing.T) {
 	s := newStubServer(t)
 	b := newTestBridge(t, s.URL, nil, Config{AlsoNotify: true, NotifyLevel: pushward.LevelCritical, SeverityLabel: "severity", DefaultSeverity: "warning"})
 
-	b.handleFiring(context.Background(), firingAlert())
+	b.handleFiring(context.Background(), firingAlert(), nil)
 
 	notif := s.find(http.MethodPost, "/notifications")
 	if notif == nil {
@@ -158,7 +158,7 @@ func TestAlsoNotifyOffSendsNoNotification(t *testing.T) {
 	s := newStubServer(t)
 	b := newTestBridge(t, s.URL, nil, Config{AlsoNotify: false, SeverityLabel: "severity", DefaultSeverity: "warning"})
 
-	b.handleFiring(context.Background(), firingAlert())
+	b.handleFiring(context.Background(), firingAlert(), nil)
 
 	if s.find(http.MethodPost, "/activities") == nil {
 		t.Error("expected a POST /activities even with AlsoNotify off")
@@ -341,7 +341,7 @@ func TestAlsoNotifyFiringOnlyOncePerAlert(t *testing.T) {
 		lastSeen:     time.Now(),
 	}
 
-	b.handleFiring(context.Background(), firingAlert())
+	b.handleFiring(context.Background(), firingAlert(), nil)
 
 	if notif := s.find(http.MethodPost, "/notifications"); notif != nil {
 		t.Errorf("a re-fire must not send another active push, got %+v", notif.body)
@@ -363,7 +363,7 @@ func TestAlsoNotifyFailureDoesNotDarkTimeline(t *testing.T) {
 	a := firingAlert()
 	a.Values = map[string]float64{"A": 42} // gives the firing path a value so a timeline update is attempted
 
-	b.handleFiring(context.Background(), a)
+	b.handleFiring(context.Background(), a, nil)
 
 	if s.find(http.MethodPatch, "/activities/"+makeSlug("HighCPU")) == nil {
 		t.Error("timeline UpdateActivity must still happen even though the notification POST failed")
@@ -534,7 +534,7 @@ func TestAckFiringRepeatsAndResolveCancelsFirst(t *testing.T) {
 	b.deliveryLog = dl
 	slug := makeSlug("HighCPU")
 
-	b.handleFiring(context.Background(), firingAlert())
+	b.handleFiring(context.Background(), firingAlert(), nil)
 
 	notifs, _ := m.requests(t, http.MethodPost, "/notifications")
 	if len(notifs) != 1 {
@@ -587,7 +587,7 @@ func TestAckOffAtPassiveLevel(t *testing.T) {
 	cfg.NotifyLevel = pushward.LevelPassive
 	b := newTestBridge(t, m.url, nil, cfg)
 
-	b.handleFiring(context.Background(), firingAlert())
+	b.handleFiring(context.Background(), firingAlert(), nil)
 	b.handleResolved(context.Background(), resolvedAlert())
 
 	notifs, _ := m.requests(t, http.MethodPost, "/notifications")
@@ -905,7 +905,7 @@ func TestAckCanceledWhenResolveOvertakesFiringPush(t *testing.T) {
 
 	a := firingAlert()
 	a.GeneratorURL = "http://grafana/alerting/grafana/rule-1/view"
-	b.handleFiring(context.Background(), a)
+	b.handleFiring(context.Background(), a, nil)
 
 	notifs, notifIdx := m.requests(t, http.MethodPost, "/notifications")
 	firing := -1

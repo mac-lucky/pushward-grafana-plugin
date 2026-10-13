@@ -78,6 +78,12 @@ type Settings struct {
 	Scale           string
 	Decimals        int
 
+	// PriorityFromSeverity derives each activity's priority from the
+	// severity label instead of using Priority for all of them. Off by
+	// default: it changes which activities PushWard evicts first and how
+	// iOS ranks them in the Dynamic Island and Smart Stack.
+	PriorityFromSeverity bool
+
 	// AlsoNotify, when true, sends a normal push notification (banner / Lock
 	// Screen) alongside the timeline Live Activity when an alert fires and when
 	// it resolves. Off by default: the Live Activity alone is the base behavior.
@@ -126,6 +132,7 @@ type rawJSONData struct {
 	SeverityLabel   string `json:"severityLabel"`
 	DefaultSeverity string `json:"defaultSeverity"`
 	Priority        *int   `json:"priority"`
+	PrioFromSev     *bool  `json:"priorityFromSeverity"`
 	HistoryWindow   string `json:"historyWindow"`
 	PollInterval    string `json:"pollInterval"`
 	CleanupDelay    string `json:"cleanupDelay"`
@@ -174,6 +181,9 @@ func LoadSettings(s backend.AppInstanceSettings) (*Settings, error) {
 	}
 	if raw.Priority != nil {
 		out.Priority = *raw.Priority
+	}
+	if raw.PrioFromSev != nil {
+		out.PriorityFromSeverity = *raw.PrioFromSev
 	}
 	if raw.Smoothing != nil {
 		out.Smoothing = *raw.Smoothing

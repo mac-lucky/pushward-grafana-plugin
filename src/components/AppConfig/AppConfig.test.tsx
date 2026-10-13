@@ -112,6 +112,19 @@ describe('Components/AppConfig', () => {
     expect(screen.getByText(/not available at silent priority/i)).toBeInTheDocument();
   });
 
+  test('priority from severity is off by default and rewords the priority field when on', () => {
+    const { unmount } = render(<AppConfig plugin={props.plugin} query={props.query} />);
+    expect(screen.getByTestId(testIds.appConfig.priorityFromSeverity)).not.toBeChecked();
+    expect(screen.getByText('Live Activity priority (0-10).')).toBeInTheDocument();
+    unmount();
+
+    const on = { meta: { ...props.plugin.meta, jsonData: { priorityFromSeverity: true } } };
+    // @ts-expect-error - addConfigPage()/setChannelSupport() aren't needed for this test
+    render(<AppConfig plugin={on} query={props.query} />);
+    expect(screen.getByTestId(testIds.appConfig.priorityFromSeverity)).toBeChecked();
+    expect(screen.getByText(/for warning alerts, unknown severities/i)).toBeInTheDocument();
+  });
+
   test('number fields keep whole numbers only', () => {
     const plugin = { meta: { ...props.plugin.meta, jsonData: { alsoNotify: true, ackEnabled: true } } };
     // @ts-expect-error - addConfigPage()/setChannelSupport() aren't needed for this test

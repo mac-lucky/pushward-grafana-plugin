@@ -44,6 +44,7 @@ export type AppPluginSettings = {
   severityLabel?: string;
   defaultSeverity?: string;
   priority?: number;
+  priorityFromSeverity?: boolean;
   historyWindow?: string;
   pollInterval?: string;
   cleanupDelay?: string;
@@ -65,6 +66,7 @@ const DEFAULTS: Required<AppPluginSettings> = {
   severityLabel: 'severity',
   defaultSeverity: 'warning',
   priority: 5,
+  priorityFromSeverity: false,
   historyWindow: '30m',
   pollInterval: '30s',
   cleanupDelay: '15m',
@@ -185,6 +187,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     severityLabel: jsonData?.severityLabel ?? DEFAULTS.severityLabel,
     defaultSeverity: jsonData?.defaultSeverity ?? DEFAULTS.defaultSeverity,
     priority: jsonData?.priority ?? DEFAULTS.priority,
+    priorityFromSeverity: jsonData?.priorityFromSeverity ?? DEFAULTS.priorityFromSeverity,
     historyWindow: jsonData?.historyWindow ?? DEFAULTS.historyWindow,
     pollInterval: jsonData?.pollInterval ?? DEFAULTS.pollInterval,
     cleanupDelay: jsonData?.cleanupDelay ?? DEFAULTS.cleanupDelay,
@@ -358,6 +361,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         severityLabel: state.severityLabel,
         defaultSeverity: state.defaultSeverity,
         priority: state.priority,
+        priorityFromSeverity: state.priorityFromSeverity,
         historyWindow: state.historyWindow,
         pollInterval: state.pollInterval,
         cleanupDelay: state.cleanupDelay,
@@ -506,7 +510,11 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
 
         <Field
           label="Priority"
-          description="Live Activity priority (0-10) for warning alerts and alerts without a severity label. Critical alerts get 10, info alerts 1 (or this value, if lower)."
+          description={
+            state.priorityFromSeverity
+              ? 'Live Activity priority (0-10) for warning alerts, unknown severities and alerts without a severity label.'
+              : 'Live Activity priority (0-10).'
+          }
         >
           <Input
             width={NUM_WIDTH}
@@ -517,6 +525,17 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
             data-testid={testIds.appConfig.priority}
             value={state.priority}
             onChange={onChangeNumber}
+          />
+        </Field>
+
+        <Field
+          label="Priority from severity"
+          description="Set the priority from the severity label instead: critical alerts get 10, info and none 1 (or the priority above, if lower), the rest the priority above. If a more severe instance starts firing under the same alert name, the activity goes up to its priority. The priority decides which activities PushWard pushes off first when your account runs out of Live Activity slots, and how high iOS ranks the activity in the Dynamic Island and Smart Stack, so this reorders your activities against every other app and integration that sends them."
+        >
+          <Switch
+            data-testid={testIds.appConfig.priorityFromSeverity}
+            value={state.priorityFromSeverity}
+            onChange={(e) => setState({ ...state, priorityFromSeverity: e.currentTarget.checked })}
           />
         </Field>
 
