@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.0
 
 - New setting **Priority from severity**, off by default. When on, an alert's Live Activity priority comes from its severity label instead of **Priority**: critical alerts get 10, info and `none` alerts 1 (or **Priority**, if that is lower), and warning alerts, unknown severities and alerts without the label keep **Priority**. If a more severe instance starts firing under the same alert name, the activity goes up to its priority. The priority does two things: PushWard pushes the lowest-priority activities off first when your account runs out of Live Activity slots, and iOS ranks activities by it in the Dynamic Island and Smart Stack. Both count every app and integration on your account, so turning this on can move your Grafana alerts above or below activities that do not come from Grafana. With the setting off, every activity gets **Priority**, as before.
 - The severity label is matched in any case, so `severity=Critical` gets the critical color and icon rather than the default severity's. Alerts with `severity=none` are shown as info.
