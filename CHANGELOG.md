@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.0
 
 - On a paid PushWard plan, a firing alert's timeline keeps filling until the alert resolves, instead of showing one point when it starts and one when it ends. Finding the rule's query used to take the `externalServiceAccounts` feature toggle or a `pushward_query` annotation. The plugin now reads the rule with the service account the Connect wizard created. If the rule queries the datasource picked under **History datasource**, the activity opens with the **History window** already drawn (30 minutes by default) and gets a new point every **Poll interval**. Rules on any other datasource, Loki for example, repeat the last value Grafana sent at the same interval. That draws a flat line, which moves only when Grafana sends the alert again. If several instances fire under one alert name, the line follows whichever one Grafana sent last.
 - Each of those points is one Live Activity update. The free plan has 250 a month, and polling would use them up in about two hours, after which even the update that closes the activity would be refused. So on the free plan the plugin does not poll. The timeline gets a point when the alert starts, whenever Grafana sends it again, and when it resolves. It still opens with the history window drawn if the rule's query is on the history datasource. If PushWard refuses an alert's updates partway, for example because the month's updates are used up or the activity is gone, its polling stops until Grafana sends the alert again.
