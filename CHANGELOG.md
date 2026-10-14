@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.14.0
+
+- A `stat_list` row can now show more than one number, and follow what its query returns. Set `value_by` to a label and every series the query returns reaches the value template as `.Values`, keyed by that label, so one row can read `5h 12% · 7d 69%`. `label_template` names the row from the series' labels on every poll, for example after whichever account a `bottomk(1, ...)` query picked. A row `timer` with `"from_value": true` counts down to the time the query returns, read as Unix seconds, and `{{clock .Value "Europe/Warsaw"}}` prints that time for apps without timers. All of it is set in the JSON view; rows without these fields work as before.
+- A row value or label longer than PushWard's 32-character limit is cut instead of being refused by the server. A `missing_value` over the limit is reported when the config loads, before anything is sent.
+
 ## 0.13.0
 
 - On a paid PushWard plan, a firing alert's timeline keeps filling until the alert resolves, instead of showing one point when it starts and one when it ends. Finding the rule's query used to take the `externalServiceAccounts` feature toggle or a `pushward_query` annotation. The plugin now reads the rule with the service account the Connect wizard created. If the rule queries the datasource picked under **History datasource**, the activity opens with the **History window** already drawn (30 minutes by default) and gets a new point every **Poll interval**. Rules on any other datasource, Loki for example, repeat the last value Grafana sent at the same interval. That draws a flat line, which moves only when Grafana sends the alert again. If several instances fire under one alert name, the line follows whichever one Grafana sent last.
