@@ -11,6 +11,7 @@ import (
 	"sync"
 	"text/template"
 	"time"
+	_ "time/tzdata" // clock's zone argument; Grafana's image has no zoneinfo to rely on
 
 	"github.com/mac-lucky/pushward-integrations/shared/pushward"
 	sharedwidgets "github.com/mac-lucky/pushward-integrations/shared/widgets"
@@ -167,8 +168,42 @@ func (s *MultiSource) Values(ctx context.Context) ([]sharedwidgets.LabeledValue,
 // no per-row override is configured.
 const defaultMissingValue = "—" // em dash, a deliberate iOS display glyph
 
-// NewStatListSource pre-parses every value template so a misconfiguration
-// surfaces at construction, not on first tick.
+// statFuncs are the helpers stat row templates get on top of text/template's.
+var statFuncs = template.FuncMap{"clock": clock}
+
+// clock formats a Unix timestamp as a time of day, with the date in front when
+// it is not today: the fallback text for a from_value timer row on clients
+// without timers. The optional argument is an IANA zone ("Europe/Warsaw");
+// without it the plugin process's zone, which is UTC because Grafana starts
+// plugins without the host's TZ. An unknown zone renders nothing, so the row shows its
+// missing_value. Unlike a "time left" text it stays the same from one poll to
+// the next, apart from dropping the date at midnight, so it does not cost a
+// push every poll.
+func clock(seconds float64, zone ...string) string {
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) || len(zone) > 1 {
+		return ""
+	}
+	loc := time.Local
+	if len(zone) == 1 {
+		var err error
+		if loc, err = time.LoadLocation(zone[0]); err != nil {
+			return ""
+		}
+	}
+	t, now := unixTime(seconds).In(loc), time.Now().In(loc)
+	if t.Year() != now.Year() || t.YearDay() != now.YearDay() {
+		return t.Format("2 Jan 15:04")
+	}
+	return t.Format("15:04")
+}
+
+func unixTime(seconds float64) time.Time {
+	whole, frac := math.Modf(seconds)
+	return time.Unix(int64(whole), int64(frac*1e9))
+}
+
+// NewStatListSource pre-parses every value and label template so a
+// misconfiguration surfaces at construction, not on first tick.
 func NewStatListSource(q Querier, rows []StatRowConfig) (sharedwidgets.StatListSource, error) {
 	if q == nil {
 		return nil, errors.New("stat_list source requires a querier")
@@ -186,25 +221,51 @@ func NewStatListSource(q Querier, rows []StatRowConfig) (sharedwidgets.StatListS
 		case r.ValueTemplate == "":
 			return nil, fmt.Errorf("stat_rows[%d]: value_template is required", i)
 		}
-		tpl, err := template.New(fmt.Sprintf("row%d", i)).Option("missingkey=zero").Parse(r.ValueTemplate)
+		tpl, err := parseRowTemplate(fmt.Sprintf("row%d", i), r.ValueTemplate)
 		if err != nil {
 			return nil, fmt.Errorf("stat_rows[%d]: parsing value_template: %w", i, err)
+		}
+		var labelTpl *template.Template
+		if r.LabelTemplate != "" {
+			if labelTpl, err = parseRowTemplate(fmt.Sprintf("row%d-label", i), r.LabelTemplate); err != nil {
+				return nil, fmt.Errorf("stat_rows[%d]: parsing label_template: %w", i, err)
+			}
 		}
 		missing := r.MissingValue
 		if missing == "" {
 			missing = defaultMissingValue
 		}
-		compiled[i] = compiledStatRow{
-			label: r.Label, query: r.Query, unit: r.Unit, missing: missing, tpl: tpl, timer: r.timer,
+		row := compiledStatRow{
+			label: r.Label, query: r.Query, unit: r.Unit, missing: missing, valueBy: r.ValueBy,
+			tpl: tpl, labelTpl: labelTpl, timer: r.timer,
 		}
+		if r.Timer != nil && r.Timer.FromValue {
+			row.timerFromValue, row.timerStyle = true, r.Timer.Style
+		}
+		compiled[i] = row
 	}
 	return &statListSource{q: q, rows: compiled}, nil
 }
 
+func parseRowTemplate(name, text string) (*template.Template, error) {
+	return template.New(name).Funcs(statFuncs).Option("missingkey=zero").Parse(text)
+}
+
 type compiledStatRow struct {
 	label, query, unit, missing string
-	tpl                         *template.Template
+	valueBy                     string
+	tpl, labelTpl               *template.Template
 	timer                       *pushward.TimerValue
+	timerFromValue              bool
+	timerStyle                  string
+}
+
+// statRowData is what a row's value and label templates see.
+type statRowData struct {
+	Value  float64
+	Unit   string
+	Labels map[string]string
+	Values map[string]float64
 }
 
 type statListSource struct {
@@ -253,26 +314,75 @@ func (s *statListSource) Rows(ctx context.Context) ([]pushward.StatRow, error) {
 }
 
 func (s *statListSource) queryRow(ctx context.Context, row compiledStatRow, now time.Time) (pushward.StatRow, error) {
+	missing := pushward.StatRow{Label: row.label, Value: row.missing, Unit: row.unit, Timer: row.timer}
 	points, err := s.q.QueryInstantAll(ctx, row.query, now)
 	if err != nil {
-		return pushward.StatRow{Label: row.label, Value: row.missing, Unit: row.unit, Timer: row.timer}, err
+		return missing, err
 	}
-	rendered := row.missing
-	if val, ok := firstFinite(points); ok {
-		if v := strings.TrimSpace(renderStatValue(row.tpl, val, row.unit)); v != "" {
-			rendered = v
+	val, ok := firstFinite(points)
+	values := valuesBy(points, row.valueBy)
+	hasData := ok
+	if row.valueBy != "" {
+		// With value_by the row is about .Values: a mistyped label leaves it
+		// empty, and rendering would turn every key into 0.
+		hasData = len(values) > 0
+	}
+	if !hasData {
+		return missing, nil
+	}
+	data := statRowData{Value: val, Unit: row.unit, Values: values}
+	if len(points) > 0 {
+		data.Labels = points[0].Labels
+	}
+	out := missing
+	if v := strings.TrimSpace(renderRow(row.tpl, data)); v != "" {
+		out.Value = truncateRunes(v, statListValueMaxRune)
+	}
+	if row.labelTpl != nil {
+		if l := strings.TrimSpace(renderRow(row.labelTpl, data)); l != "" {
+			out.Label = truncateRunes(l, statListLabelMaxRune)
 		}
 	}
-	return pushward.StatRow{Label: row.label, Value: rendered, Unit: row.unit, Timer: row.timer}, nil
+	if row.timerFromValue {
+		out.Timer = nil
+		if ok {
+			if t := unixTime(val); !t.Before(widgetDateFloor) && !t.After(now.Add(widgetDateHorizon)) {
+				out.Timer = &pushward.TimerValue{Date: t.UTC(), Style: row.timerStyle}
+			}
+		}
+	}
+	return out, nil
 }
 
-func renderStatValue(tpl *template.Template, value float64, unit string) string {
+// valuesBy keys every finite series by the given label's value; nil when no
+// label is named. The first series wins a duplicate key.
+func valuesBy(points []bridge.LabeledPoint, label string) map[string]float64 {
+	if label == "" {
+		return nil
+	}
+	out := make(map[string]float64, len(points))
+	for _, p := range points {
+		key, has := p.Labels[label]
+		v := p.Point.Value
+		if _, seen := out[key]; !has || seen || math.IsNaN(v) || math.IsInf(v, 0) {
+			continue
+		}
+		out[key] = v
+	}
+	return out
+}
+
+func renderRow(tpl *template.Template, data statRowData) string {
 	var buf bytes.Buffer
-	if err := tpl.Execute(&buf, struct {
-		Value float64
-		Unit  string
-	}{value, unit}); err != nil {
+	if err := tpl.Execute(&buf, data); err != nil {
 		return ""
 	}
 	return buf.String()
+}
+
+func truncateRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
 }

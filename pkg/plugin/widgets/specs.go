@@ -12,7 +12,7 @@ import (
 // BuildSpecs converts validated widget configs into shared widget specs,
 // attaching the datasource-proxy-backed source (scalar, multi-series, or
 // stat_list) for each. Call Validate before BuildSpecs. Returns an error only
-// if a stat_list value template fails to compile.
+// if a stat_list value or label template fails to compile.
 func BuildSpecs(cfgs []WidgetConfig, q Querier) ([]sharedwidgets.Spec, error) {
 	specs := make([]sharedwidgets.Spec, 0, len(cfgs))
 	for _, w := range cfgs {

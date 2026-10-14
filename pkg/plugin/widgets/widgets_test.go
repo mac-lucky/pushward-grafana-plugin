@@ -462,3 +462,201 @@ func TestScalarSourceNonFiniteIsNoData(t *testing.T) {
 		t.Errorf("Value err = %v, want ErrNoData for a non-finite reading", err)
 	}
 }
+
+// TestStatRowValueByLabelTemplateAndTimerFromValue covers the three per-poll
+// row fields together, the way a quota widget uses them: two readings in one
+// row, and a countdown row named after the series it found.
+func TestStatRowValueByLabelTemplateAndTimerFromValue(t *testing.T) {
+	reset := time.Now().Add(90 * time.Minute).Truncate(time.Second)
+	raw := `[{"slug":"sl","template":"stat_list","stat_rows":[
+	  {"label":"Account 1","query":"usage","value_by":"window",
+	   "value_template":"5h {{printf \"%.0f\" (index .Values \"five_hour\")}}% / 7d {{printf \"%.0f\" .Values.seven_day}}%"},
+	  {"label":"Next reset","query":"reset","label_template":"Reset {{.Labels.account}}",
+	   "value_template":"{{clock .Value}}","missing_value":"None expected","timer":{"from_value":true}},
+	  {"label":"Next reset","query":"none","label_template":"Reset {{.Labels.account}}",
+	   "value_template":"{{clock .Value}}","missing_value":"None expected","timer":{"from_value":true}}
+	]}]`
+	cfgs, err := ParseWidgets(json.RawMessage(raw))
+	if err != nil {
+		t.Fatalf("ParseWidgets: %v", err)
+	}
+	q := &stubQuerier{byExpr: map[string][]bridge.LabeledPoint{
+		"usage": {
+			point(12, map[string]string{"window": "five_hour"}),
+			point(69, map[string]string{"window": "seven_day"}),
+			point(math.NaN(), map[string]string{"window": "scoped"}),
+			point(99, map[string]string{"window": "five_hour"}), // duplicate key: the first series wins
+		},
+		"reset": {point(float64(reset.Unix()), map[string]string{"account": "claude2"})},
+	}}
+	src, err := NewStatListSource(q, cfgs[0].StatRows)
+	if err != nil {
+		t.Fatalf("NewStatListSource: %v", err)
+	}
+	rows, err := src.Rows(context.Background())
+	if err != nil {
+		t.Fatalf("Rows: %v", err)
+	}
+	if got, want := rows[0].Value, "5h 12% / 7d 69%"; got != want {
+		t.Errorf("value_by row = %q, want %q", got, want)
+	}
+	if rows[1].Label != "Reset claude2" {
+		t.Errorf("label = %q, want it rendered from the series' labels", rows[1].Label)
+	}
+	if rows[1].Timer == nil || !rows[1].Timer.Date.Equal(reset) {
+		t.Fatalf("timer = %+v, want one dated %v from the polled value", rows[1].Timer, reset)
+	}
+	if rows[1].Value != clock(float64(reset.Unix())) || rows[1].Value == "" {
+		t.Errorf("fallback value = %q, want the clock time", rows[1].Value)
+	}
+	want := pushward.StatRow{Label: "Next reset", Value: "None expected"}
+	if rows[2] != want {
+		t.Errorf("no-data row = %+v, want %+v (static label, no timer)", rows[2], want)
+	}
+}
+
+func TestStatRowLabelTemplateIsCapped(t *testing.T) {
+	q := &stubQuerier{byExpr: map[string][]bridge.LabeledPoint{
+		"q": {point(1, map[string]string{"email": "someone.with.a.long.name@example.com"})},
+	}}
+	src, err := NewStatListSource(q, []StatRowConfig{
+		{Label: "x", Query: "q", ValueTemplate: `{{.Value}}`, LabelTemplate: `Reset {{.Labels.email}}`},
+	})
+	if err != nil {
+		t.Fatalf("NewStatListSource: %v", err)
+	}
+	rows, err := src.Rows(context.Background())
+	if err != nil {
+		t.Fatalf("Rows: %v", err)
+	}
+	if n := len([]rune(rows[0].Label)); n != statListLabelMaxRune {
+		t.Errorf("label %q has %d runes, want it cut to %d", rows[0].Label, n, statListLabelMaxRune)
+	}
+}
+
+func TestTimerFromValueOutOfRangeHasNoTimer(t *testing.T) {
+	q := &stubQuerier{byExpr: map[string][]bridge.LabeledPoint{
+		"ms":  {point(float64(time.Now().UnixMilli()), nil)}, // milliseconds by mistake: far past the horizon
+		"old": {point(0, nil)},
+	}}
+	rows := []StatRowConfig{
+		{Label: "ms", Query: "ms", ValueTemplate: `x`, Timer: &TimerConfig{FromValue: true}},
+		{Label: "old", Query: "old", ValueTemplate: `x`, Timer: &TimerConfig{FromValue: true}},
+	}
+	src, err := NewStatListSource(q, rows)
+	if err != nil {
+		t.Fatalf("NewStatListSource: %v", err)
+	}
+	got, err := src.Rows(context.Background())
+	if err != nil {
+		t.Fatalf("Rows: %v", err)
+	}
+	for _, r := range got {
+		if r.Timer != nil {
+			t.Errorf("row %q got timer %v, want none for a date the server would reject", r.Label, r.Timer.Date)
+		}
+	}
+}
+
+func TestValidateRejectsBadRowTimers(t *testing.T) {
+	cases := map[string]string{
+		"from_value and date": `[{"slug":"a","template":"stat_list","stat_rows":[{"label":"x","query":"q","value_template":"{{.Value}}",
+		  "timer":{"from_value":true,"date":"2026-12-24T18:00:00Z"}}]}]`,
+		"from_value bad style": `[{"slug":"a","template":"stat_list","stat_rows":[{"label":"x","query":"q","value_template":"{{.Value}}",
+		  "timer":{"from_value":true,"style":"stopwatch"}}]}]`,
+		"from_value on subtitle": `[{"slug":"a","query":"up","content":{"subtitle_timer":{"from_value":true}}}]`,
+	}
+	for name, raw := range cases {
+		if _, err := ParseWidgets(json.RawMessage(raw)); err == nil {
+			t.Errorf("%s: expected validation error, got nil", name)
+		}
+	}
+	bad := []StatRowConfig{{Label: "x", Query: "q", ValueTemplate: `{{.Value}}`, LabelTemplate: `{{.Labels.x`}}
+	if _, err := NewStatListSource(&stubQuerier{}, bad); err == nil {
+		t.Error("a label_template that does not parse was accepted")
+	}
+}
+
+func TestClock(t *testing.T) {
+	now := time.Now()
+	if got, want := clock(float64(now.Unix())), now.Format("15:04"); got != want {
+		t.Errorf("clock(today) = %q, want %q", got, want)
+	}
+	later := now.Add(72 * time.Hour)
+	if got, want := clock(float64(later.Unix())), later.Format("2 Jan 15:04"); got != want {
+		t.Errorf("clock(in 3 days) = %q, want %q", got, want)
+	}
+	if got := clock(math.NaN()); got != "" {
+		t.Errorf("clock(NaN) = %q, want empty", got)
+	}
+}
+
+func TestStatRowValueIsCappedAndValueByTypoIsMissing(t *testing.T) {
+	q := &stubQuerier{byExpr: map[string][]bridge.LabeledPoint{
+		"q":    {point(1, map[string]string{"email": "someone.with.a.long.name@example.com", "window": "five_hour"})},
+		"anon": {point(1, nil)},
+	}}
+	src, err := NewStatListSource(q, []StatRowConfig{
+		{Label: "long", Query: "q", ValueTemplate: `{{.Labels.email}}`},
+		// "windw" matches no series, so the row must not render .Values as zeros.
+		{Label: "typo", Query: "q", ValueBy: "windw", ValueTemplate: `5h {{.Values.five_hour}}%`, MissingValue: "n/a"},
+		// A series without the label: the with-guard renders empty and label takes over.
+		{Label: "Next", Query: "anon", ValueTemplate: `x`, LabelTemplate: `{{with .Labels.account}}Reset {{.}}{{end}}`},
+	})
+	if err != nil {
+		t.Fatalf("NewStatListSource: %v", err)
+	}
+	rows, err := src.Rows(context.Background())
+	if err != nil {
+		t.Fatalf("Rows: %v", err)
+	}
+	if n := len([]rune(rows[0].Value)); n != statListValueMaxRune {
+		t.Errorf("value %q has %d runes, want it cut to %d", rows[0].Value, n, statListValueMaxRune)
+	}
+	if rows[1].Value != "n/a" {
+		t.Errorf("value_by typo rendered %q, want the missing placeholder", rows[1].Value)
+	}
+	if rows[2].Label != "Next" {
+		t.Errorf("label = %q, want the static fallback when the template renders empty", rows[2].Label)
+	}
+}
+
+func TestValidateRejectsValuesWithoutValueBy(t *testing.T) {
+	for name, raw := range map[string]string{
+		"value_template": `[{"slug":"a","template":"stat_list","stat_rows":[{"label":"x","query":"q","value_template":"{{.Values.five_hour}}"}]}]`,
+		"label_template": `[{"slug":"a","template":"stat_list","stat_rows":[{"label":"x","query":"q","value_template":"{{.Value}}","label_template":"{{index .Values \"a\"}}"}]}]`,
+	} {
+		if _, err := ParseWidgets(json.RawMessage(raw)); err == nil {
+			t.Errorf("%s: .Values without value_by was accepted", name)
+		}
+	}
+}
+
+func TestClockZone(t *testing.T) {
+	warsaw, err := time.LoadLocation("Europe/Warsaw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Now().In(warsaw).Truncate(time.Minute)
+	want := ts.Format("15:04")
+	if ts.YearDay() != time.Now().In(warsaw).YearDay() {
+		want = ts.Format("2 Jan 15:04")
+	}
+	if got := clock(float64(ts.Unix()), "Europe/Warsaw"); got != want {
+		t.Errorf("clock(now, Europe/Warsaw) = %q, want %q", got, want)
+	}
+	if got := clock(float64(ts.Unix()), "Mars/Olympus"); got != "" {
+		t.Errorf("unknown zone rendered %q, want empty so the row shows missing_value", got)
+	}
+	if got := clock(float64(ts.Unix()), "UTC", "UTC"); got != "" {
+		t.Errorf("two zones rendered %q, want empty", got)
+	}
+}
+
+func TestValidateRejectsLongMissingValue(t *testing.T) {
+	raw := `[{"slug":"a","template":"stat_list","stat_rows":[{"label":"x","query":"q","value_template":"{{.Value}}",
+	  "missing_value":"this placeholder is longer than thirty-two runes"}]}]`
+	if _, err := ParseWidgets(json.RawMessage(raw)); err == nil {
+		t.Error("a missing_value past the server's 32-rune cap was accepted")
+	}
+}

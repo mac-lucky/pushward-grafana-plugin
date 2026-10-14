@@ -28,6 +28,7 @@ import (
 const (
 	statListMaxRows      = sharedwidgets.DefaultMaxStatRows
 	statListLabelMaxRune = 32 // mirror pushward-server/internal/model/widget.go
+	statListValueMaxRune = 32 // mirror pushward-server/internal/model/widget.go
 	statListUnitMaxRune  = 16 // mirror pushward-server/internal/model/widget.go
 	expiredTextMaxRune   = 64 // mirror pushward-server/internal/model/widget.go
 	staleAfterMin        = 60
@@ -99,14 +100,27 @@ type WidgetConfig struct {
 func (w WidgetConfig) IntervalDuration() time.Duration { return w.interval }
 
 // StatRowConfig is one row of a stat_list widget. ValueTemplate is a Go
-// template applied to the polled float; vars are .Value (float64) and .Unit
-// (string). MissingValue is emitted when the query returns no data.
+// template applied to the polled reading; vars are .Value (float64, the first
+// series), .Unit (string), .Labels (the first series' labels) and .Values (see
+// ValueBy). MissingValue is emitted when the query returns no data.
 type StatRowConfig struct {
 	Label         string `json:"label"`
 	Query         string `json:"query"`
 	ValueTemplate string `json:"value_template"`
 	Unit          string `json:"unit"`
 	MissingValue  string `json:"missing_value"`
+	// LabelTemplate renders the label from the same vars on every poll, e.g.
+	// "{{with .Labels.account}}Reset {{.}}{{end}}". Label is the fallback when
+	// it renders empty or the query returns nothing (an absent label renders
+	// as empty text, hence the with). Both templates' output is cut to the
+	// server's length caps.
+	LabelTemplate string `json:"label_template,omitempty"`
+	// ValueBy names a label: every series the query returns is then exposed
+	// as .Values, keyed by that label's value, so one row can show several
+	// readings ("5h {{index .Values \"five_hour\"}}"). A series missing the
+	// label or holding a non-finite value is left out, and a row whose query
+	// leaves nothing in .Values shows MissingValue.
+	ValueBy string `json:"value_by,omitempty"`
 	// Trigger controls whether a change in this row's value triggers a widget
 	// update; defaults to true (nil -> true). Set false to render the row
 	// without letting its value drive PATCHes.
@@ -116,7 +130,8 @@ type StatRowConfig struct {
 	// to know about timers, so the row keeps its query either way.
 	Timer *TimerConfig `json:"timer,omitempty"`
 
-	// timer is the parsed Timer, populated by Validate.
+	// timer is the parsed Timer, populated by Validate; nil for a from_value
+	// timer, whose date is only known once the query answers.
 	timer *pushward.TimerValue
 }
 
@@ -129,6 +144,11 @@ func (r StatRowConfig) Triggers() bool { return r.Trigger == nil || *r.Trigger }
 type TimerConfig struct {
 	Date  string `json:"date"`
 	Style string `json:"style,omitempty"` // "timer" (default) | "relative"
+	// FromValue takes the date from the row's polled value, read as Unix
+	// seconds, instead of Date: a countdown to whatever time the query
+	// returns. Stat rows only. While the query has no finite reading, or one
+	// outside the server's date range, the row goes without a timer.
+	FromValue bool `json:"from_value,omitempty"`
 }
 
 // WidgetContentConfig is the static portion of pushward.WidgetContent supplied
@@ -406,6 +426,9 @@ func parseTimer(field string, tc *TimerConfig, maxDate time.Time) (*pushward.Tim
 	if !validTimerStyles[tc.Style] {
 		return nil, fmt.Errorf("%s.style must be one of timer, relative", field)
 	}
+	if tc.FromValue {
+		return nil, fmt.Errorf("%s.from_value only works on a stat row's timer, which has a polled value to take the date from", field)
+	}
 	d, err := parseWidgetDate(field+".date", tc.Date, maxDate)
 	if err != nil {
 		return nil, err
@@ -439,6 +462,23 @@ func validateStatRows(slug string, idx int, rows []StatRowConfig) error {
 		}
 		if runeLen(row.Unit) > statListUnitMaxRune {
 			return fmt.Errorf("widgets[%d] %q: stat_rows[%d].unit exceeds %d characters", idx, slug, j, statListUnitMaxRune)
+		}
+		if runeLen(row.MissingValue) > statListValueMaxRune {
+			return fmt.Errorf("widgets[%d] %q: stat_rows[%d].missing_value exceeds %d characters", idx, slug, j, statListValueMaxRune)
+		}
+		// Without value_by every .Values key reads as 0, which on a usage row
+		// looks like a fresh quota rather than a mistake.
+		if row.ValueBy == "" && (strings.Contains(row.ValueTemplate, ".Values") || strings.Contains(row.LabelTemplate, ".Values")) {
+			return fmt.Errorf("widgets[%d] %q: stat_rows[%d] uses .Values but sets no value_by", idx, slug, j)
+		}
+		if row.Timer != nil && row.Timer.FromValue {
+			switch {
+			case row.Timer.Date != "":
+				return fmt.Errorf("widgets[%d] %q: stat_rows[%d].timer sets both date and from_value; pick one", idx, slug, j)
+			case !validTimerStyles[row.Timer.Style]:
+				return fmt.Errorf("widgets[%d] %q: stat_rows[%d].timer.style must be one of timer, relative", idx, slug, j)
+			}
+			continue
 		}
 		timer, err := parseTimer(fmt.Sprintf("stat_rows[%d].timer", j), row.Timer, maxDate)
 		if err != nil {
