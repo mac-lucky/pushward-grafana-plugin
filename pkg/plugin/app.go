@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -76,11 +77,17 @@ type App struct {
 	probeDetail string
 	probeCached bool
 
+	// plan cache for canPoll: whether the account's Live Activity updates are
+	// uncapped, and when that was last read from /auth/me.
+	planMu       sync.Mutex
+	planAt       time.Time
+	planUncapped bool
+
 	// Grafana connection: app URL + the IAM external service-account token,
 	// refreshed from every request's GrafanaConfig. grafanaTok is the IAM token
 	// ONLY (empty unless the externalServiceAccounts toggle is on). The
-	// provisioning/alertmanager client reads it via grafanaConn(); the
-	// datasource-proxy querier instead prefers the webhook SA token via
+	// alertmanager backstop reads it via grafanaConn(); the datasource-proxy
+	// querier and the rule lookups instead prefer the webhook SA token via
 	// grafanaConnDatasource(). A stable token keeps background pollers
 	// authenticated between requests.
 	connMu     sync.RWMutex
@@ -103,7 +110,7 @@ func NewApp(ctx context.Context, settings backend.AppInstanceSettings) (instance
 	}
 
 	app.pw = pushward.NewClient(s.APIURL, s.APIKey)
-	app.grafana = grafanaapi.NewClient(app.grafanaConn)
+	app.grafana = grafanaapi.NewClient(app.grafanaConn, app.grafanaConnDatasource)
 
 	querier := &dsQuerier{app: app}
 	poller := bridge.NewPoller(querier, app.pw, s.PollInterval)
@@ -119,6 +126,8 @@ func NewApp(ctx context.Context, settings backend.AppInstanceSettings) (instance
 		Decimals:             &s.Decimals,
 		PriorityFromSeverity: s.PriorityFromSeverity,
 		ActivityMode:         s.ActivityMode,
+		DatasourceUID:        s.DatasourceUID,
+		CanPoll:              app.canPoll,
 		AlsoNotify:           s.AlsoNotify,
 		NotifyLevel:          s.NotifyLevel,
 		Ack:                  s.Ack,
@@ -351,6 +360,64 @@ func (a *App) probeAPIKey(ctx context.Context) (status probeStatus, detail strin
 	}
 }
 
+// planCheckTTL bounds how long canPoll reuses what /auth/me said about the
+// plan, so an upgrade starts the pollers within minutes without a round-trip
+// per webhook.
+const planCheckTTL = 10 * time.Minute
+
+// canPoll reports whether the PushWard account's Live Activity updates are
+// uncapped, as /auth/me says by leaving out live_activity_updates_limit (paid
+// plans). Only then does the bridge run its per-alert pollers: each spends
+// one update per poll interval, and a free account's monthly few hundred would
+// be gone within hours, after which the activity's own end is refused too.
+// A failed check keeps the last answer; with none yet, the answer is no.
+func (a *App) canPoll(ctx context.Context) bool {
+	a.planMu.Lock()
+	defer a.planMu.Unlock() // held across the request: concurrent webhooks wait for one answer
+	if !a.planAt.IsZero() && time.Since(a.planAt) < planCheckTTL {
+		return a.planUncapped
+	}
+	uncapped, err := a.fetchPlanUncapped(ctx)
+	if err != nil {
+		slog.Warn("could not read the PushWard plan, timeline polling stays as it was", "error", err)
+		return a.planUncapped
+	}
+	a.planAt, a.planUncapped = time.Now(), uncapped
+	return uncapped
+}
+
+func (a *App) fetchPlanUncapped(ctx context.Context) (bool, error) {
+	if a.settings.APIKey == "" {
+		return false, errors.New("PushWard API key not set")
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet,
+		strings.TrimRight(a.settings.APIURL, "/")+"/auth/me", nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.settings.APIKey)
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("/auth/me returned status %d", resp.StatusCode)
+	}
+	var me struct {
+		LiveActivityUpdatesLimit *int `json:"live_activity_updates_limit"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&me); err != nil {
+		return false, fmt.Errorf("decoding /auth/me: %w", err)
+	}
+	return me.LiveActivityUpdatesLimit == nil, nil
+}
+
 // probeCacheTTL bounds how long a probeAPIKey result is reused. Short enough
 // that fixing a key reflects on the next refresh, long enough to collapse the
 // back-to-back CheckHealth + /healthz calls a single page load fires.
@@ -377,15 +444,15 @@ func (a *App) probeAPIKeyCached(ctx context.Context) (probeStatus, string) {
 }
 
 // grafanaConn returns the Grafana app URL and the IAM external service-account
-// token, used by the grafanaapi client for Grafana's own provisioning + alertmanager
-// APIs (rule-query extract, alert-state backstop). Those calls need plugin-scoped
-// permissions, so there is deliberately NO webhook-token fallback here: the webhook
-// SA is a Viewer that can be folder-RBAC-scoped, and feeding it to the alertmanager
+// token, used by the grafanaapi client for the alertmanager API (alert-state
+// backstop). There is deliberately NO webhook-token fallback here: the webhook SA
+// is a Viewer that can be folder-RBAC-scoped, and feeding it to the alertmanager
 // backstop would let a scoped-empty alert list look like "resolved" and prematurely
 // end a still-firing activity. When the IAM token is absent (the
-// externalServiceAccounts toggle is off — the default), the token is empty and these
-// calls fail closed: the backstop stays an inert no-op and the staleTimeout sweeper
-// handles cleanup, exactly as documented.
+// externalServiceAccounts toggle is off, the default), the token is empty and the
+// backstop fails closed: it stays an inert no-op and the staleTimeout sweeper
+// handles cleanup, exactly as documented. Rule-query lookups do not go through
+// here; see grafanaConnDatasource.
 func (a *App) grafanaConn() (string, string) {
 	a.connMu.RLock()
 	defer a.connMu.RUnlock()
@@ -397,9 +464,14 @@ func (a *App) grafanaConn() (string, string) {
 // minted by the Connect wizard — a Viewer SA that can query datasources through the
 // proxy (verified live) and is stable across the instance lifetime — and falls back
 // to the IAM token when the wizard hasn't run. A Viewer SA is sufficient here (unlike
-// the provisioning/alertmanager path), so the fallback is safe; preferring the stable
+// the alertmanager backstop), so the fallback is safe; preferring the stable
 // webhook token also means a rotated or revoked IAM token can't silently dark history
 // queries. Returns an empty token when neither is available; callers must guard.
+//
+// The grafanaapi client also reads alert rules with it (rule-query extract, so the
+// poller can run without the externalServiceAccounts toggle). That is safe for the
+// same reason: a Viewer has alert-rule read, and a failed or folder-scoped read
+// only means the alert gets no poller. It never decides that an alert resolved.
 func (a *App) grafanaConnDatasource() (string, string) {
 	a.connMu.RLock()
 	url, iamTok := a.grafanaURL, a.grafanaTok
@@ -451,7 +523,7 @@ func (a *App) refreshGrafanaConn(ctx context.Context) {
 // dsQuerier implements bridge.MetricsQuerier by querying the configured datasource
 // through Grafana's datasource proxy. It authenticates with grafanaConnDatasource()
 // — the webhook SA token preferred, IAM token as fallback — NOT the IAM-only
-// grafanaConn() the provisioning/alertmanager client uses; the two accessors are
+// grafanaConn() the alertmanager backstop uses; the two accessors are
 // intentionally distinct (see grafanaConnDatasource). A fresh (stateless) metrics
 // client is built per query so it always uses the current connection; the cost is
 // negligible (a struct over a shared http.Client).

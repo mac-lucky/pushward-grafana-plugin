@@ -100,7 +100,7 @@ const (
 // with a stub. nil disables auto-extract and the alertmanager backstop.
 type GrafanaResolver interface {
 	ExtractRuleUID(generatorURL string) string
-	GetRuleQuery(ctx context.Context, ruleUID string) (expr, refID string, err error)
+	GetRuleQuery(ctx context.Context, ruleUID string) (expr, refID, datasourceUID string, err error)
 	IsAlertFiring(ctx context.Context, alertname string) (bool, error)
 }
 
@@ -142,6 +142,14 @@ type Config struct {
 	// notification when it fires and when it resolves, whatever AlsoNotify
 	// says, so an alert routed here is never dropped.
 	ActivityMode string
+	// DatasourceUID is the datasource the poller queries. A rule query
+	// resolved from Grafana is polled only when it targets this datasource;
+	// otherwise the alert's timeline repeats its last webhook values.
+	DatasourceUID string
+	// CanPoll reports whether the account can afford the per-alert pollers,
+	// one Live Activity update per alert per poll interval. Asked before
+	// starting one; false leaves the timeline to the webhooks. Nil means yes.
+	CanPoll func(context.Context) bool
 	// AlsoNotify sends a normal push notification (banner / Lock Screen)
 	// alongside the timeline Live Activity: one when an alert starts firing and
 	// one when it resolves. Off by default.
@@ -194,9 +202,12 @@ type alertState struct {
 	// ruleUID is the Grafana alert-rule UID extracted from the alert's
 	// generatorURL (empty when it can't be parsed). It's the preferred silence
 	// matcher (__alert_rule_uid__) for the management UI's "Silence" action.
-	ruleUID     string
+	ruleUID string
+	// expr and refID are the alert's query, set once queryKnown by the first
+	// webhook that resolved it (storeQuery); expr "" means none to poll.
 	expr        string
 	refID       string
+	queryKnown  bool
 	seriesLabel string
 	// primary is the pushward_primary_series annotation captured at create time.
 	// Stored so the terminal ENDED update (incl. the annotation-free alertmanager
@@ -217,6 +228,17 @@ type alertState struct {
 	// transition so the server's AccumulateHistory preserves accumulated
 	// history instead of pruning it as an orphaned series.
 	lastValues map[string]float64
+	// repeat holds, per firing instance (fingerprint), the webhook values
+	// the poller re-sends every tick for an alert with no query to poll
+	// (expr ""), so its timeline keeps filling while it fires. An instance's
+	// webhook replaces its entry, its resolve deletes it.
+	repeat map[string]repeatSample
+}
+
+// repeatSample is one instance's latest webhook values and when they came.
+type repeatSample struct {
+	values map[string]float64
+	at     time.Time
 }
 
 // NewBridge constructs the bridge and starts its background sweeper and
@@ -409,6 +431,12 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 	existing := b.active[mapKey]
 	isNew := existing == nil
 	var notifyOnly bool
+	// expr and refID are the alert's query, resolved once per alert (see
+	// storeQuery); expr "" means its poller only repeats webhook values.
+	// pollLast is what the query poller last sent.
+	var expr, refID string
+	var queryKnown bool
+	var pollLast map[string]float64
 	if isNew {
 		if len(b.active) >= activeAlertCap {
 			b.mu.Unlock()
@@ -431,6 +459,8 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 		existing.lastSeen = time.Now()
 		existing.fingerprints[a.Fingerprint] = struct{}{}
 		notifyOnly = existing.notifyOnly
+		expr, refID, queryKnown = existing.expr, existing.refID, existing.queryKnown
+		pollLast = existing.lastValues
 		if !notifyOnly && priority > existing.priority {
 			raise = &priority
 		}
@@ -446,7 +476,10 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 		return
 	}
 
-	expr, refID := b.resolveQuery(ctx, a)
+	if !queryKnown {
+		e, r := b.resolveQuery(ctx, a)
+		expr, refID = b.storeQuery(mapKey, e, r)
+	}
 
 	if isNew {
 		err := b.pwClient.CreateActivity(ctx, slug, alertname, priority,
@@ -463,15 +496,6 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 		logger.Info("activity created")
 		b.recordActivityCreated()
 		b.record(alertname, slug, "created", true, "")
-
-		// Re-check entry exists before writing — a concurrent resolved webhook
-		// could have deleted the entry between the unlock above and this lock.
-		b.mu.Lock()
-		if state, ok := b.active[mapKey]; ok {
-			state.expr = expr
-			state.refID = refID
-		}
-		b.mu.Unlock()
 	}
 
 	severity := b.resolveSeverity(a)
@@ -497,16 +521,22 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 	}
 
 	var values map[string]float64
-	if len(history) > 0 {
+	switch {
+	case len(history) > 0:
 		values = latestValues(history)
-	} else {
+	case !isNew && expr != "":
+		// A repeat webhook for an alert the poller queries. Its series are
+		// keyed by metric labels and the webhook's by ref ID, so sending the
+		// webhook's would prune the polled history as orphans server-side.
+		values = b.finalValues(ctx, expr, seriesLabel, pollLast)
+	default:
 		values = b.resolveValues(a, refID, seriesLabel)
 	}
 
 	if len(values) == 0 {
 		logger.Warn("no values available, skipping initial update (poller will seed and populate)",
 			"expr_resolved", expr != "", "refID", refID)
-		if isNew && expr != "" {
+		if isNew && expr != "" && b.canPoll(ctx) {
 			// Hand the timeline template/styling to the poller so it seeds the
 			// activity on its first tick that yields values — otherwise the
 			// activity would be left on the generic template while ONGOING. (A
@@ -562,20 +592,61 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 	// Only seed lastValues from the initial history fetch — values from the
 	// webhook payload use Grafana ref-ID keys that differ from the poller's
 	// metric-derived keys. Letting a re-fire overwrite would drop accumulated
-	// history on resolve.
-	if len(history) > 0 {
-		b.mu.Lock()
-		if state, ok := b.active[mapKey]; ok {
+	// history on resolve. An alert with no query to poll repeats the
+	// webhook's values instead, per instance (see repeatValues).
+	b.mu.Lock()
+	if state, ok := b.active[mapKey]; ok {
+		if len(history) > 0 {
 			state.lastValues = values
 		}
-		b.mu.Unlock()
+		if expr == "" {
+			if state.repeat == nil {
+				state.repeat = make(map[string]repeatSample)
+			}
+			state.repeat[a.Fingerprint] = repeatSample{values: values, at: time.Now()}
+		}
 	}
+	b.mu.Unlock()
 
-	if isNew && expr != "" {
+	// On every webhook, not only the first: the first may have had no values,
+	// and a poller stops itself when PushWard refuses its updates (quota,
+	// preempted activity), so the next webhook is what brings it back. Both
+	// starts are no-ops while a poller runs.
+	if !b.canPoll(ctx) {
+		return
+	}
+	if expr != "" {
 		if b.startPollerIfTracked(mapKey, slug, expr, seriesLabel, primary, nil) {
 			logger.Info("poller started")
 		}
+	} else if b.startRepeatIfTracked(mapKey, slug, primary) {
+		logger.Info("no query to poll, repeating the last values until resolved")
 	}
+}
+
+// canPoll reports whether the account can afford a poller: each tick spends
+// one Live Activity update, which a capped (free) account has a few hundred of
+// a month. Nil Config.CanPoll means yes.
+func (b *Bridge) canPoll(ctx context.Context) bool {
+	return b.cfg.CanPoll == nil || b.cfg.CanPoll(ctx)
+}
+
+// storeQuery records the query resolved for the alert under mapKey unless one
+// is recorded already, and returns the recorded one. The first webhook to
+// resolve it wins, so concurrent instances agree on one query, and later
+// webhooks reuse it rather than asking Grafana again, where a transient
+// failure would switch the timeline's series keys. Untracked: returns its own.
+func (b *Bridge) storeQuery(mapKey, expr, refID string) (string, string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	state, ok := b.active[mapKey]
+	if !ok {
+		return expr, refID
+	}
+	if !state.queryKnown {
+		state.expr, state.refID, state.queryKnown = expr, refID, true
+	}
+	return state.expr, state.refID
 }
 
 // notifyFiring sends the firing push of an alert that has no Live Activity.
@@ -643,8 +714,43 @@ func (b *Bridge) startPollerIfTracked(mapKey, slug, expr, seriesLabel, primary s
 	if _, ok := b.active[mapKey]; !ok {
 		return false // resolved or swept while this firing was still in flight
 	}
-	b.poller.StartWithSeed(slug, expr, seriesLabel, primary, seed)
-	return true
+	return b.poller.StartWithSeed(slug, expr, seriesLabel, primary, seed)
+}
+
+// startRepeatIfTracked starts the poller that re-sends the stored webhook
+// values of the alert under mapKey, under the same b.mu guard as
+// startPollerIfTracked, and reports whether it started one. The fetch reads
+// them under b.mu on each tick (never while the poller holds p.mu) and finds
+// nothing once the alert is gone.
+func (b *Bridge) startRepeatIfTracked(mapKey, slug, primary string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.active[mapKey]; !ok {
+		return false
+	}
+	return b.poller.StartRepeat(slug, primary, func(context.Context) (map[string]float64, error) {
+		return b.repeatValues(mapKey), nil
+	})
+}
+
+// repeatValues returns what the repeat of the alert under mapKey sends next:
+// the latest webhook values among its instances still firing, nil once the
+// alert is gone. Several instances share the ref-ID series key, so only one
+// of them can be on the timeline at a time.
+func (b *Bridge) repeatValues(mapKey string) map[string]float64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	state, ok := b.active[mapKey]
+	if !ok {
+		return nil
+	}
+	var latest repeatSample
+	for _, s := range state.repeat {
+		if s.at.After(latest.at) {
+			latest = s
+		}
+	}
+	return latest.values
 }
 
 func (b *Bridge) handleResolved(ctx context.Context, a alert) {
@@ -678,6 +784,7 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 	}
 
 	delete(state.fingerprints, a.Fingerprint)
+	delete(state.repeat, a.Fingerprint) // stop repeating a resolved instance's value
 
 	if len(state.fingerprints) > 0 {
 		remaining := len(state.fingerprints)
@@ -702,16 +809,22 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 		return
 	}
 
-	b.poller.Stop(slug)
+	// Wait for a tick already in flight: its ONGOING patch landing after the
+	// ENDED update below would bring the activity back.
+	b.poller.StopAndWait(slug)
 
 	severity := b.resolveSeverity(a)
 
 	// Reuse the same series keys the poller was sending so the server's
 	// AccumulateHistory keeps the accumulated history instead of pruning it as
 	// an orphan series on the final update.
+	// Without a query, lastValues are only the repeated firing values; the
+	// resolve's own are fresher and keyed the same way.
 	values := b.finalValues(ctx, expr, seriesLabel, lastValues)
-	if len(values) == 0 {
-		values = b.resolveValues(a, refID, seriesLabel)
+	if expr == "" || len(values) == 0 {
+		if v := b.resolveValues(a, refID, seriesLabel); len(v) > 0 {
+			values = v
+		}
 	}
 	values, _ = capSeries(values, primary)
 
@@ -779,10 +892,18 @@ func (b *Bridge) resolveQuery(ctx context.Context, a alert) (expr, refID string)
 	if b.grafanaClient != nil {
 		ruleUID := b.grafanaClient.ExtractRuleUID(a.GeneratorURL)
 		if ruleUID != "" {
-			rqExpr, rqRefID, err := b.grafanaClient.GetRuleQuery(ctx, ruleUID)
-			if err != nil {
+			rqExpr, rqRefID, dsUID, err := b.grafanaClient.GetRuleQuery(ctx, ruleUID)
+			switch {
+			case err != nil:
 				slog.Warn("failed to auto-extract query", "rule_uid", ruleUID, "error", err)
-			} else {
+			case dsUID != b.cfg.DatasourceUID:
+				// Polled against the configured datasource it would fail on
+				// every tick (a LogsQL rule against Prometheus, say). The ref
+				// ID still picks the rule's own value out of the webhook's.
+				slog.Debug("rule queries another datasource, repeating its webhook values instead",
+					"rule_uid", ruleUID, "rule_datasource", dsUID, "datasource", b.cfg.DatasourceUID)
+				return "", rqRefID
+			default:
 				return rqExpr, rqRefID
 			}
 		}
@@ -1390,7 +1511,7 @@ func (b *Bridge) checkAlertStates(ctx context.Context) {
 			continue
 		}
 
-		b.poller.Stop(e.state.slug)
+		b.poller.StopAndWait(e.state.slug) // before the ENDED update, as in handleResolved
 		b.endAlertActivity(ctx, e.state.alertname, &e.state)
 	}
 }

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- On a paid PushWard plan, a firing alert's timeline keeps filling until the alert resolves, instead of showing one point when it starts and one when it ends. Finding the rule's query used to take the `externalServiceAccounts` feature toggle or a `pushward_query` annotation. The plugin now reads the rule with the service account the Connect wizard created. If the rule queries the datasource picked under **History datasource**, the activity opens with the **History window** already drawn (30 minutes by default) and gets a new point every **Poll interval**. Rules on any other datasource, Loki for example, repeat the last value Grafana sent at the same interval. That draws a flat line, which moves only when Grafana sends the alert again. If several instances fire under one alert name, the line follows whichever one Grafana sent last.
+- Each of those points is one Live Activity update. The free plan has 250 a month, and polling would use them up in about two hours, after which even the update that closes the activity would be refused. So on the free plan the plugin does not poll. The timeline gets a point when the alert starts, whenever Grafana sends it again, and when it resolves. It still opens with the history window drawn if the rule's query is on the history datasource. If PushWard refuses an alert's updates partway, for example because the month's updates are used up or the activity is gone, its polling stops until Grafana sends the alert again.
+- Swiping a firing alert's Live Activity away no longer brings it back within a poll interval. It comes back when Grafana sends the alert again, which happens every 4 hours with the default notification policy.
+- A timeline no longer starts over when Grafana sends a still-firing alert again.
+- When the rule's query isn't polled, the timeline shows that query's value as one line, instead of one line per expression step (`A`, `B`, `C`), as long as Grafana includes the query's value in the alert.
+
 ## 0.12.0
 
 - New setting **Live Activities**: **All alerts** (the default, same as before) or **Only labeled alerts**. With the second, only alert rules labeled `pushward_activity="true"` get a timeline Live Activity. A `pushward_activity="false"` label keeps a rule out of Live Activities under **All alerts** too. Alerts without a Live Activity still reach you as a push notification when they fire and when they resolve, even with **Also send a push notification** off, so you can route everything to PushWard and keep the Lock Screen for the alerts you care about. The push follows the **Notification priority** and **Repeat until acknowledged** settings, which the Configuration page now also shows when **Only labeled alerts** is picked.

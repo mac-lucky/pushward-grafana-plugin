@@ -887,9 +887,9 @@ type resolvingResolver struct {
 
 func (r resolvingResolver) ExtractRuleUID(string) string { return "rule-1" }
 
-func (r resolvingResolver) GetRuleQuery(context.Context, string) (string, string, error) {
+func (r resolvingResolver) GetRuleQuery(context.Context, string) (string, string, string, error) {
 	r.resolve()
-	return "", "", errors.New("no query")
+	return "", "", "", errors.New("no query")
 }
 
 func (r resolvingResolver) IsAlertFiring(context.Context, string) (bool, error) { return false, nil }

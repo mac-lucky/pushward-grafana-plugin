@@ -2,7 +2,9 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -23,8 +25,12 @@ type MetricsQuerier interface {
 // server's AccumulateHistory from pruning prior series).
 type UpdateCallback func(slug string, values map[string]float64)
 
+// FetchFunc returns the values one poll tick sends. Empty values skip the tick.
+type FetchFunc func(ctx context.Context) (map[string]float64, error)
+
 // Poller manages per-alert polling goroutines that query Prometheus/VM
-// (through the Grafana datasource proxy) and push timeline updates to PushWard.
+// (through the Grafana datasource proxy), or re-send an alert's last known
+// values (StartRepeat), and push timeline updates to PushWard.
 type Poller struct {
 	metricsClient MetricsQuerier
 	pwClient      *pushward.Client
@@ -69,24 +75,56 @@ func (p *Poller) Start(slug, expr, seriesLabel, primary string) {
 // UpdateActivity establishing the timeline template/styling on its first
 // successful tick (then value-only patches thereafter). Used when the firing
 // webhook had no values to seed with, so the activity would otherwise be left on
-// the generic template while ONGOING.
-func (p *Poller) StartWithSeed(slug, expr, seriesLabel, primary string, seed *pushward.Content) {
+// the generic template while ONGOING. Reports whether it started a poller.
+func (p *Poller) StartWithSeed(slug, expr, seriesLabel, primary string, seed *pushward.Content) bool {
+	return p.start(slug, p.queryFetch(expr, seriesLabel), primary, seed)
+}
+
+// StartRepeat polls slug with fetch in place of a PromQL query: each tick sends
+// whatever fetch returns. The bridge uses it for alerts it has no query to poll
+// for, re-sending their last known values so the timeline keeps filling while
+// they fire. The activity must already be on the timeline template; a repeat
+// never seeds. No-op if already polling for this slug; reports whether it
+// started a poller.
+func (p *Poller) StartRepeat(slug, primary string, fetch FetchFunc) bool {
+	return p.start(slug, fetch, primary, nil)
+}
+
+func (p *Poller) start(slug string, fetch FetchFunc, primary string, seed *pushward.Content) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if _, ok := p.active[slug]; ok {
-		return
+		return false
 	}
 
 	ctx, cancel := context.WithCancel(context.Background()) // #nosec G118 -- cancel is stored in p.active and called in Stop/StopAll
-	done := make(chan struct{})
-	p.active[slug] = &pollHandle{cancel: cancel, done: done}
+	h := &pollHandle{cancel: cancel, done: make(chan struct{})}
+	p.active[slug] = h
 	p.wg.Add(1)
-	go p.run(ctx, slug, expr, seriesLabel, primary, seed, done)
+	go p.run(ctx, slug, h, fetch, primary, seed)
+	return true
+}
+
+// queryFetch returns a FetchFunc that runs expr as an instant query and keys
+// each series by SeriesKey.
+func (p *Poller) queryFetch(expr, seriesLabel string) FetchFunc {
+	return func(ctx context.Context) (map[string]float64, error) {
+		points, err := p.metricsClient.QueryInstantAll(ctx, expr, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		values := make(map[string]float64, len(points))
+		for _, lp := range points {
+			values[SeriesKey(lp.Labels, seriesLabel)] = lp.Point.Value
+		}
+		return values, nil
+	}
 }
 
 // Stop cancels the polling goroutine for the given slug (asynchronous; does not
-// wait for it to exit). Used by the hot resolve/sweep/checker paths.
+// wait for it to exit). Used by the stale sweep, which holds b.mu and sends
+// no terminal update; the paths that end an activity use StopAndWait.
 func (p *Poller) Stop(slug string) {
 	p.mu.Lock()
 	h, ok := p.active[slug]
@@ -153,9 +191,9 @@ func (p *Poller) SetUpdateCallback(cb UpdateCallback) {
 	p.mu.Unlock()
 }
 
-func (p *Poller) run(ctx context.Context, slug, expr, seriesLabel, primary string, seed *pushward.Content, done chan struct{}) {
+func (p *Poller) run(ctx context.Context, slug string, h *pollHandle, fetch FetchFunc, primary string, seed *pushward.Content) {
 	defer p.wg.Done()
-	defer close(done) // signal StopAndWait that this goroutine has fully exited
+	defer close(h.done) // signal StopAndWait that this goroutine has fully exited
 
 	logger := slog.With("slug", slug)
 	ticker := time.NewTicker(p.interval)
@@ -171,32 +209,62 @@ func (p *Poller) run(ctx context.Context, slug, expr, seriesLabel, primary strin
 			logger.Info("poller stopped")
 			return
 		case <-ticker.C:
-			seeded = p.poll(ctx, logger, slug, expr, seriesLabel, primary, seed, seeded)
+			var refused bool
+			seeded, refused = p.poll(ctx, logger, slug, fetch, primary, seed, seeded)
+			if refused {
+				// Free the slot so the alert's next webhook can start a
+				// poller again; leave it alone if a Stop already took it.
+				p.mu.Lock()
+				if p.active[slug] == h {
+					delete(p.active, slug)
+				}
+				p.mu.Unlock()
+				h.cancel()
+				logger.Info("poller stopped until the alert's next webhook: PushWard refuses its updates")
+				return
+			}
 		}
 	}
 }
 
-// poll queries the metric and pushes an update, returning the (possibly updated)
-// seeded state.
-func (p *Poller) poll(ctx context.Context, logger *slog.Logger, slug, expr, seriesLabel, primary string, seed *pushward.Content, seeded bool) bool {
-	points, err := p.metricsClient.QueryInstantAll(ctx, expr, time.Now())
+// pollRefused reports whether PushWard will keep refusing an activity's
+// updates, so polling on would only spend requests: its Live Activity quota is
+// spent until the month ends, or the activity is gone, preempted (swiped away
+// or evicted) or otherwise not patchable, which comes back as a 4xx. A rate
+// limit, a timeout, a conflict and a 5xx are worth the next tick.
+func pollRefused(err error) bool {
+	var qe *pushward.QuotaExceededError
+	if errors.As(err, &qe) {
+		return true
+	}
+	var he *pushward.HTTPError
+	if !errors.As(err, &he) {
+		return false
+	}
+	switch he.StatusCode {
+	case http.StatusTooManyRequests, http.StatusRequestTimeout, http.StatusConflict:
+		return false
+	}
+	return he.StatusCode >= 400 && he.StatusCode < 500
+}
+
+// poll fetches the values and pushes an update. It returns the (possibly
+// updated) seeded state and whether PushWard refused the update for good (see
+// pollRefused).
+func (p *Poller) poll(ctx context.Context, logger *slog.Logger, slug string, fetch FetchFunc, primary string, seed *pushward.Content, seeded bool) (bool, bool) {
+	values, err := fetch(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
-			return seeded
+			return seeded, false
 		}
 		logger.Warn("poll failed", "error", err)
-		return seeded
+		return seeded, false
 	}
 
-	if len(points) == 0 {
-		return seeded
+	if len(values) == 0 {
+		return seeded, false
 	}
 
-	values := make(map[string]float64, len(points))
-	for _, lp := range points {
-		key := SeriesKey(lp.Labels, seriesLabel)
-		values[key] = lp.Point.Value
-	}
 	if capped, trimmed := capSeries(values, primary); trimmed {
 		// Steady-state continuation of a condition handleFiring already Warn'd
 		// once; Debug here so a persistently oversized series set doesn't spam
@@ -217,25 +285,27 @@ func (p *Poller) poll(ctx context.Context, logger *slog.Logger, slug, expr, seri
 			Content: content,
 		}); err != nil {
 			if ctx.Err() != nil {
-				return seeded
+				return seeded, false
 			}
 			logger.Warn("poll seed update failed", "error", err)
-			return seeded
+			return seeded, pollRefused(err)
 		}
 		logger.Info("activity seeded by poller on first values")
 		seeded = true
 	} else {
 		// Merge-patch with just the new sample. Template/units/accent/display
-		// config were seeded already and are preserved server-side.
+		// config were seeded already and are preserved server-side. No state:
+		// the server keeps the stored one. Sending ONGOING would restart an
+		// activity the user swiped away or PushWard preempted, with its
+		// history dropped; a preempted one refuses a stateless patch instead.
 		if err := p.pwClient.PatchActivity(ctx, slug, pushward.PatchRequest{
-			State:   pushward.StateOngoing,
 			Content: &pushward.ContentPatch{Value: values},
 		}); err != nil {
 			if ctx.Err() != nil {
-				return seeded
+				return seeded, false
 			}
 			logger.Warn("poll update failed", "error", err)
-			return seeded
+			return seeded, pollRefused(err)
 		}
 	}
 
@@ -245,5 +315,5 @@ func (p *Poller) poll(ctx context.Context, logger *slog.Logger, slug, expr, seri
 	if cb != nil {
 		cb(slug, values)
 	}
-	return seeded
+	return seeded, false
 }

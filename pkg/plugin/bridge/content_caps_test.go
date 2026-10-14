@@ -208,7 +208,7 @@ func TestPollCapsSeriesAndKeepsPrimary(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// seeded=true -> the value-only patch path, which is the steady-state tick.
-	p.poll(context.Background(), logger, "slug", "up", "", "zzz-primary", nil, true)
+	p.poll(context.Background(), logger, "slug", p.queryFetch("up", ""), "zzz-primary", nil, true)
 
 	if len(gotValues) != maxTimelineSeries {
 		t.Fatalf("poll recorded %d series, want %d", len(gotValues), maxTimelineSeries)

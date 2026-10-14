@@ -659,7 +659,10 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         )}
 
         <ControlledCollapse label="Advanced timeline options" isOpen={false}>
-          <Field label="Poll interval" description="How often firing alerts are re-queried (e.g. 30s).">
+          <Field
+            label="Poll interval"
+            description="How often a firing alert's timeline gets a new point (e.g. 30s). Paid PushWard plans only: each point is one Live Activity update, so on the free plan the timeline updates only when Grafana sends the alert."
+          >
             <Input
               width={NUM_WIDTH}
               name="pollInterval"

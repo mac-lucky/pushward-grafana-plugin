@@ -13,7 +13,7 @@ What it isn't: a native contact-point type. Grafana hardcodes those in core, so 
 ## Features
 
 - Connect wizard: one click creates the PushWard webhook contact point (no manual URL or header copying) and a scoped service-account token.
-- Embedded timeline bridge: the Go backend queries your Grafana datasource for the alert's metric history and pushes a live timeline Live Activity. No `pushward-grafana` container required.
+- Embedded timeline bridge: the Go backend queries your Grafana datasource for the alert's metric history and pushes a live timeline Live Activity. No `pushward-grafana` container required. It reads the rule's query with the Connect wizard's service account, so this works without the `externalServiceAccounts` toggle. On a paid PushWard plan the timeline gets a new point every poll interval while the alert fires; a rule on a different datasource repeats its last alert value instead. The free plan's 250 Live Activity updates a month would not last a day of that, so there the timeline updates only when Grafana sends the alert.
 - Widget engine: declare `value`, `progress`, `status`, `gauge`, `stat_list`, `trend` or `countdown` widgets in the config; the backend polls each on its own interval (`on_change` or `always` mode, multi-series fan-out) and publishes them to your iOS widgets.
 - Management: see current Live Activities and a recent delivery log, send a test notification, or fire a test timeline.
 - Alert-rule links: "View in PushWard" on alert rules and instances.
