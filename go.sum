@@ -128,8 +128,8 @@ github.com/klauspost/cpuid/v2 v2.4.0 h1:S6Hrbc7+ywsr0r+RLapfGBHfyefhCTwEh3A0tV91
 github.com/klauspost/cpuid/v2 v2.4.0/go.mod h1:19jmZ9mjzoF//ddRSUsv0zfBTJWh3QJh9FNxZTMrGxU=
 github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0SNc=
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
-github.com/mac-lucky/pushward-integrations/shared v0.0.0-20261015080708-0a148ed384c3 h1:s0XttqjNEQN74d2h8eqXi+wOmC8jqSy1uApRoj1Pahk=
-github.com/mac-lucky/pushward-integrations/shared v0.0.0-20261015080708-0a148ed384c3/go.mod h1:GIxQWS5jvc87Pnje91xmi6A4nalAnXwoBAg++JSWD1A=
+github.com/mac-lucky/pushward-integrations/shared v0.0.0-20261015104611-f7a44a20d744 h1:pPF8X0l/66mGvp9KYydilC0JJfr+8XZSyd5fup7ndlI=
+github.com/mac-lucky/pushward-integrations/shared v0.0.0-20261015104611-f7a44a20d744/go.mod h1:GIxQWS5jvc87Pnje91xmi6A4nalAnXwoBAg++JSWD1A=
 github.com/magefile/mage v1.17.2 h1:fyXVu1eadI8Ap1HCCNgEhJ5McIWiYhLR8uol64ZZc40=
 github.com/magefile/mage v1.17.2/go.mod h1:Yj51kqllmsgFpvvSzgrZPK9WtluG3kUhFaBUVLo4feA=
 github.com/mattetti/filebuffer v1.0.1 h1:gG7pyfnSIZCxdoKq+cPa8T0hhYtD9NxCdI4D7PTjRLM=
