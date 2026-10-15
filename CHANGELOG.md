@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.14.1
+
+- Dependency updates only; nothing changes in how the plugin looks or behaves.
+
 ## 0.14.0
 
 - A `stat_list` row can now show more than one number, and follow what its query returns. Set `value_by` to a label and every series the query returns reaches the value template as `.Values`, keyed by that label, so one row can read `5h 12% · 7d 69%`. `label_template` names the row from the series' labels on every poll, for example after whichever account a `bottomk(1, ...)` query picked. A row `timer` with `"from_value": true` counts down to the time the query returns, read as Unix seconds, and `{{clock .Value "Europe/Warsaw"}}` prints that time for apps without timers. All of it is set in the JSON view; rows without these fields work as before.
