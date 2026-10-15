@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.14.2
+
+- The backend is now built with Go 1.27; nothing changes in how the plugin looks or behaves.
+
 ## 0.14.1
 
 - Dependency updates only; nothing changes in how the plugin looks or behaves.
