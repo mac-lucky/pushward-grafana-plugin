@@ -358,7 +358,7 @@ func (b *Bridge) ProcessWebhook(_ context.Context, rawJSON []byte) error {
 	}
 
 	b.wg.Add(1)
-	go func() {
+	go func() { // #nosec G118 -- the request context ends when the handler answers 200; webhookTimeout bounds this work and b.wg waits for it
 		defer b.wg.Done()
 		// Use a bounded background context so slow Prometheus/PushWard calls can
 		// still be interrupted on shutdown rather than blocking indefinitely.
