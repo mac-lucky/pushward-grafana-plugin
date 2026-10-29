@@ -17,7 +17,7 @@
   "license": "Apache-2.0",
   "devDependencies": {
     "@grafana/eslint-config": "9.0.0",
-    "@grafana/plugin-e2e": "3.15.2",
+    "@grafana/plugin-e2e": "3.15.3",
     "@grafana/sign-plugin": "3.3.3",
     "@grafana/tsconfig": "2.2.0",
     "@playwright/test": "1.64.1",
@@ -37,7 +37,7 @@
     "css-loader": "7.1.5",
     "eslint": "9.39.5",
     "eslint-config-prettier": "10.1.8",
-    "eslint-plugin-jsdoc": "65.4.0",
+    "eslint-plugin-jsdoc": "65.4.1",
     "eslint-plugin-react": "7.37.5",
     "eslint-plugin-react-hooks": "7.1.1",
     "eslint-webpack-plugin": "6.0.0",
