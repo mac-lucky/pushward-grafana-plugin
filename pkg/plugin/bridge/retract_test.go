@@ -303,7 +303,8 @@ func TestRetractQueuedOncePerCollapseID(t *testing.T) {
 }
 
 // With Also send a push notification off, an alert with a Live Activity sent
-// no push, so the paths that end it have nothing to retract.
+// no push, so the paths that end it have nothing to retract. A resolve that
+// overtakes the firing push needs that push, so it has no case here.
 func TestNoRetractWithoutAPush(t *testing.T) {
 	slug := makeSlug("HighCPU")
 	cases := []struct {
@@ -322,9 +323,6 @@ func TestNoRetractWithoutAPush(t *testing.T) {
 		}},
 		{"resolved webhook for an untracked alert", func(b *Bridge) {
 			b.handleResolved(context.Background(), resolvedAlert(), map[string]bool{})
-		}},
-		{"resolve overtakes the firing push", func(b *Bridge) {
-			b.cancelAckIfGone(context.Background(), slog.Default(), "HighCPU", "HighCPU", slug, false)
 		}},
 	}
 	for _, tc := range cases {
