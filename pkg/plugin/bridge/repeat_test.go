@@ -164,7 +164,7 @@ func TestRepeatResendsWebhookValuesWhileFiring(t *testing.T) {
 
 	r := resolvedAlert()
 	r.Values = map[string]float64{"A": 54}
-	b.handleResolved(context.Background(), r)
+	b.handleResolved(context.Background(), r, nil)
 	if n := b.poller.ActiveCount(); n != 0 {
 		t.Fatalf("poller still running %d goroutines after resolve", n)
 	}
@@ -475,7 +475,7 @@ func TestRepeatFollowsInstancesStillFiring(t *testing.T) {
 
 	r := resolvedAlert()
 	r.Fingerprint = "fp2"
-	b.handleResolved(context.Background(), r)
+	b.handleResolved(context.Background(), r, nil)
 	before := repeatsOf(s.activityWrites(slug), hot)
 	waitFor(t, "host1's value repeating again", func() bool { return repeatsOf(s.activityWrites(slug), hot) > before })
 }

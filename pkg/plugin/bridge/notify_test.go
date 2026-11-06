@@ -88,6 +88,7 @@ func newTestBridge(t *testing.T, url string, resolver GrafanaResolver, cfg Confi
 	})
 	return &Bridge{
 		pwClient:      pw,
+		retractClient: pushward.NewClient(url, "hlk_x", pushward.WithRetryBudget(time.Nanosecond)),
 		poller:        poller,
 		grafanaClient: resolver,
 		active:        make(map[string]*alertState),
@@ -197,7 +198,7 @@ func TestAlsoNotifyResolvedCarriesConfiguredLevel(t *testing.T) {
 				Fingerprint: "fp1",
 				Labels:      map[string]string{"alertname": "HighCPU"},
 				Annotations: map[string]string{"summary": "CPU back to normal"},
-			})
+			}, nil)
 
 			notif := s.find(http.MethodPost, "/notifications")
 			if notif == nil {
@@ -390,7 +391,7 @@ func TestAlsoNotifyPartialResolutionNoPush(t *testing.T) {
 		Status:      alertStatusResolved,
 		Fingerprint: "fp1",
 		Labels:      map[string]string{"alertname": "HighCPU"},
-	})
+	}, nil)
 
 	if notif := s.find(http.MethodPost, "/notifications"); notif != nil {
 		t.Errorf("resolving one of two instances must not send a resolved push, got %+v", notif.body)
@@ -417,7 +418,7 @@ func TestAlsoNotifyResolvedOffSendsNoNotification(t *testing.T) {
 		Status:      alertStatusResolved,
 		Fingerprint: "fp1",
 		Labels:      map[string]string{"alertname": "HighCPU"},
-	})
+	}, nil)
 
 	if s.find(http.MethodPatch, "/activities/"+makeSlug("HighCPU")) == nil {
 		t.Error("the activity should still be ended even with AlsoNotify off")
@@ -564,7 +565,7 @@ func TestAckFiringRepeatsAndResolveCancelsFirst(t *testing.T) {
 		t.Errorf("delivery log notified = %+v, want detail noting ack", e)
 	}
 
-	b.handleResolved(context.Background(), resolvedAlert())
+	b.handleResolved(context.Background(), resolvedAlert(), nil)
 
 	cancels, cancelIdx := m.requests(t, http.MethodPost, "/notifications/receipts/cancel")
 	if len(cancels) != 1 || cancels[0]["tag"] != slug {
@@ -598,7 +599,7 @@ func TestAckOffAtPassiveLevel(t *testing.T) {
 	b := newTestBridge(t, m.url, nil, cfg)
 
 	b.handleFiring(context.Background(), firingAlert(), nil)
-	b.handleResolved(context.Background(), resolvedAlert())
+	b.handleResolved(context.Background(), resolvedAlert(), nil)
 
 	notifs, _ := m.requests(t, http.MethodPost, "/notifications")
 	if len(notifs) != 2 {
@@ -724,7 +725,7 @@ func TestAckCanceledOnEveryEnd(t *testing.T) {
 			b.Forget(context.Background(), slug)
 		}, false},
 		{"resolved webhook for an untracked alert", func(b *Bridge) {
-			b.handleResolved(context.Background(), resolvedAlert())
+			b.handleResolved(context.Background(), resolvedAlert(), nil)
 		}, false},
 	}
 	for _, tc := range cases {
@@ -777,7 +778,7 @@ func TestAckCancelFailureStillSendsResolved(t *testing.T) {
 		lastSeen:     time.Now(),
 	}
 
-	b.handleResolved(context.Background(), resolvedAlert())
+	b.handleResolved(context.Background(), resolvedAlert(), nil)
 
 	if e := dl.find("ack-cancel"); e == nil || e.ok {
 		t.Errorf("delivery log ack-cancel = %+v, want a recorded failure", e)
@@ -910,7 +911,7 @@ func (r resolvingResolver) IsAlertFiring(context.Context, string) (bool, error) 
 func TestAckCanceledWhenResolveOvertakesFiringPush(t *testing.T) {
 	m := newMockServer(t, testutil.MockOptions{})
 	var b *Bridge
-	res := resolvingResolver{resolve: func() { b.handleResolved(context.Background(), resolvedAlert()) }}
+	res := resolvingResolver{resolve: func() { b.handleResolved(context.Background(), resolvedAlert(), nil) }}
 	b = newTestBridge(t, m.url, res, ackConfig())
 	dl := &recLog{}
 	b.deliveryLog = dl

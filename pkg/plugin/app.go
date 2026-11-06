@@ -114,7 +114,10 @@ func NewApp(ctx context.Context, settings backend.AppInstanceSettings) (instance
 
 	querier := &dsQuerier{app: app}
 	poller := bridge.NewPoller(querier, app.pw, s.PollInterval)
-	app.bridge = bridge.NewBridge(app.pw, querier, app.grafana, poller, app.delivery, app.metrics, bridge.Config{
+	// Retracts never retry: a throttled one fails at once and the resolve
+	// sends the resolved push instead.
+	retracts := pushward.NewClient(s.APIURL, s.APIKey, pushward.WithRetryBudget(time.Nanosecond))
+	app.bridge = bridge.NewBridge(app.pw, retracts, querier, app.grafana, poller, app.delivery, app.metrics, bridge.Config{
 		HistoryWindow:        s.HistoryWindow,
 		Priority:             s.Priority,
 		CleanupDelay:         s.CleanupDelay,

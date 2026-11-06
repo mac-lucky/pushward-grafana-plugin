@@ -77,8 +77,9 @@ const (
 	// resolve, so a slow cancel never holds up the resolved push behind it.
 	ackCancelTimeout = 5 * time.Second
 
-	// retractTimeout bounds taking an alert's push back. The server allows
-	// few retracts a minute, so a 429 wait is cut short rather than waited out.
+	// retractTimeout bounds taking an alert's push back. The retract client
+	// does not retry, so a throttled retract fails at once and a resolve sends
+	// the resolved push instead of waiting out the rate limit.
 	retractTimeout = 5 * time.Second
 
 	// What a push says in place of the alert when it cannot be encrypted.
@@ -185,6 +186,7 @@ type Config struct {
 // timeline activities with sparkline history.
 type Bridge struct {
 	pwClient      *pushward.Client
+	retractClient *pushward.Client // no retries, see retractTimeout
 	metricsClient MetricsQuerier
 	grafanaClient GrafanaResolver // nil if auto-extract disabled
 	poller        *Poller
@@ -254,8 +256,10 @@ type repeatSample struct {
 // alertmanager backstop. Call Stop to tear them down. p is the per-alert poller
 // (constructed by the caller with the same metrics querier); gr may be nil to
 // disable PromQL auto-extract and the alertmanager backstop; dl and m may be nil.
+// rc makes the retracts and should not retry (see retractTimeout).
 func NewBridge(
 	pw *pushward.Client,
+	rc *pushward.Client,
 	mq MetricsQuerier,
 	gr GrafanaResolver,
 	p *Poller,
@@ -271,6 +275,7 @@ func NewBridge(
 	}
 	b := &Bridge{
 		pwClient:      pw,
+		retractClient: rc,
 		metricsClient: mq,
 		grafanaClient: gr,
 		poller:        p,
@@ -374,12 +379,20 @@ func (b *Bridge) ProcessWebhook(_ context.Context, rawJSON []byte) error {
 		ctx, cancel := context.WithTimeout(context.Background(), webhookTimeout)
 		defer cancel()
 		priorities := b.payloadPriorities(payload.Alerts)
+		// No resolve may retract a collapse id that also fires in this
+		// payload: the retract lands late and would take the firing push.
+		noRetract := make(map[string]bool)
+		for _, a := range payload.Alerts {
+			if a.Status == alertStatusFiring {
+				noRetract[alertCollapseID(a.Labels["alertname"])] = true
+			}
+		}
 		for _, a := range payload.Alerts {
 			switch a.Status {
 			case alertStatusFiring:
 				b.handleFiring(ctx, a, priorities)
 			case alertStatusResolved:
-				b.handleResolved(ctx, a)
+				b.handleResolved(ctx, a, noRetract)
 			}
 		}
 	}()
@@ -765,7 +778,10 @@ func (b *Bridge) repeatValues(mapKey string) map[string]float64 {
 	return latest.values
 }
 
-func (b *Bridge) handleResolved(ctx context.Context, a alert) {
+// handleResolved processes one resolved alert. noRetract holds the collapse
+// ids its payload must not retract (see ProcessWebhook); an untracked resolve
+// adds the one it retracts, so a payload retracts each id once.
+func (b *Bridge) handleResolved(ctx context.Context, a alert, noRetract map[string]bool) {
 	if a.Fingerprint == "" {
 		slog.Warn("alert has empty fingerprint, skipping")
 		return
@@ -794,7 +810,12 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 		// of push it was, if one was sent.
 		notifyOnly := !b.wantsActivity(a)
 		b.cancelAck(ctx, logger, alertname, slug, b.ackFor(notifyOnly))
-		b.retractDetached(ctx, logger, alertname, slug, b.retractFor(notifyOnly))
+		id := alertCollapseID(alertname)
+		retract := b.retractFor(notifyOnly) && !noRetract[id]
+		if retract {
+			noRetract[id] = true
+		}
+		b.retractDetached(ctx, logger, alertname, slug, retract)
 		return
 	}
 
@@ -817,9 +838,10 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 	notifyOnly := state.notifyOnly
 	delete(b.active, mapKey)
 	b.mu.Unlock()
+	retract := !noRetract[alertCollapseID(alertname)]
 
 	if notifyOnly {
-		b.sendResolved(ctx, logger, a, "", slug, alertname, true)
+		b.sendResolved(ctx, logger, a, "", slug, alertname, true, retract)
 		return
 	}
 
@@ -863,7 +885,7 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 
 	// Fire the passive "resolved" push regardless of the ended-update outcome: if
 	// that update failed the activity is still live on-device, which is exactly
-	// when the user most needs the resolved notification.
+	// when the user most needs the resolved notification, so it is not retracted.
 	//
 	// Drop the deep link in that case, though: the likeliest reason the end
 	// update failed is that the activity is gone server-side, and a slug that
@@ -873,7 +895,7 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 		if !ended {
 			linkSlug = ""
 		}
-		b.sendResolved(ctx, logger, a, linkSlug, slug, alertname, false)
+		b.sendResolved(ctx, logger, a, linkSlug, slug, alertname, false, ended && retract)
 	}
 }
 
@@ -1146,10 +1168,12 @@ func alertCollapseID(alertname string) string {
 // it stops the acknowledge repeats first, then with RetractOnResolve takes
 // the push back and sends the resolved push only when the retract reached no
 // device. Never both: the retract lands late and would take the resolved
-// push with it. notifyOnly says whether the alert has no Live Activity.
-func (b *Bridge) sendResolved(ctx context.Context, logger *slog.Logger, a alert, slug, tag, alertname string, notifyOnly bool) {
+// push with it. retract false sends the resolved push in any case: the Live
+// Activity did not end, or the alert fires again in the same payload.
+// notifyOnly says whether the alert has no Live Activity.
+func (b *Bridge) sendResolved(ctx context.Context, logger *slog.Logger, a alert, slug, tag, alertname string, notifyOnly, retract bool) {
 	b.cancelAck(ctx, logger, alertname, tag, b.ackFor(notifyOnly))
-	if b.cfg.RetractOnResolve && b.retractAlert(ctx, logger, alertname, tag) {
+	if retract && b.cfg.RetractOnResolve && b.retractAlert(ctx, logger, alertname, tag) {
 		return
 	}
 	b.sendAlertNotification(ctx, logger, a, slug, tag, alertname, true, false)
@@ -1315,7 +1339,7 @@ func (b *Bridge) cancelAck(ctx context.Context, logger *slog.Logger, alertname, 
 func (b *Bridge) retractAlert(ctx context.Context, logger *slog.Logger, alertname, tag string) bool {
 	ctx, cancel := context.WithTimeout(ctx, retractTimeout)
 	defer cancel()
-	n, err := b.pwClient.RetractNotifications(ctx, alertCollapseID(alertname))
+	n, err := b.retractClient.RetractNotifications(ctx, alertCollapseID(alertname))
 	if err != nil {
 		logger.Warn("failed to retract the alert push", "error", err)
 		b.record(alertname, tag, "retract", false, err.Error())
@@ -1326,9 +1350,10 @@ func (b *Bridge) retractAlert(ctx context.Context, logger *slog.Logger, alertnam
 }
 
 // retractDetached runs retractAlert on its own goroutine, cut loose from
-// ctx's deadline, for the paths that end an alert without a resolved push:
-// a 429 wait there must not spend the webhook's budget. retract false makes
-// no call. Stop waits for it.
+// ctx's deadline, for the webhook paths that end an alert without a resolved
+// push: nothing waits on the result, so it must not spend the webhook's
+// budget. retract false makes no call. Stop waits for it, which is safe only
+// from a webhook goroutine: Stop drains those before it waits on bgWg.
 func (b *Bridge) retractDetached(ctx context.Context, logger *slog.Logger, alertname, tag string, retract bool) {
 	if !retract {
 		return
@@ -1436,7 +1461,9 @@ func (b *Bridge) Forget(ctx context.Context, slug string) bool {
 	logger := slog.With("slug", slug)
 	b.cancelAck(ctx, logger, alertname, slug, b.ackEnabled())
 	// Only a tracked alert says which push to take back.
-	b.retractDetached(ctx, logger, alertname, slug, key != "" && b.retractFor(false))
+	if key != "" && b.retractFor(false) {
+		b.retractAlert(ctx, logger, alertname, slug)
+	}
 	return key != ""
 }
 
@@ -1504,11 +1531,17 @@ func (b *Bridge) sweepStale(ctx context.Context, maxAge time.Duration) {
 		}
 	}
 	b.mu.Unlock()
-	// Outside b.mu: each cancel is a network call.
+	// Outside b.mu: each cancel and retract is a network call. The retracts
+	// go one at a time and once per collapse id: the account shares a small
+	// retract budget.
+	retracted := make(map[string]bool)
 	for _, st := range swept {
 		logger := slog.With("alertname", st.alertname, "slug", st.slug)
 		b.cancelAck(ctx, logger, st.alertname, st.slug, b.ackFor(st.notifyOnly))
-		b.retractDetached(ctx, logger, st.alertname, st.slug, b.retractFor(st.notifyOnly))
+		if id := alertCollapseID(st.alertname); b.retractFor(st.notifyOnly) && !retracted[id] {
+			retracted[id] = true
+			b.retractAlert(ctx, logger, st.alertname, st.slug)
+		}
 	}
 }
 
@@ -1585,7 +1618,7 @@ func (b *Bridge) checkAlertStates(ctx context.Context) {
 			// No activity to end: send the resolved push the missed webhook
 			// would have, with only the alert name to go on.
 			logger := slog.With("alertname", e.state.alertname, "slug", e.state.slug)
-			b.sendResolved(ctx, logger, alert{}, "", e.state.slug, e.state.alertname, true)
+			b.sendResolved(ctx, logger, alert{}, "", e.state.slug, e.state.alertname, true, true)
 			continue
 		}
 
@@ -1619,10 +1652,12 @@ func (b *Bridge) endAlertActivity(ctx context.Context, alertname string, state *
 		content.Value = any(values)
 	}
 
+	ended := true
 	if err := b.pwClient.UpdateActivity(ctx, state.slug, pushward.UpdateRequest{
 		State:   pushward.StateEnded,
 		Content: content,
 	}); err != nil {
+		ended = false
 		logger.Error("failed to end resolved activity", "error", err)
 		b.recordError()
 		b.record(alertname, state.slug, "resolved", false, err.Error())
@@ -1635,9 +1670,10 @@ func (b *Bridge) endAlertActivity(ctx context.Context, alertname string, state *
 	// Also notify on the backstop resolve so a dropped resolved-webhook still
 	// alerts the user. There is no webhook payload here, so the push carries only
 	// the alert name (no instance/summary) - an empty alert yields the plain
-	// "Grafana"/"Resolved" notification.
+	// "Grafana"/"Resolved" notification. Not retracted when the activity is
+	// still up, as in handleResolved.
 	if b.cfg.AlsoNotify {
-		b.sendResolved(ctx, logger, alert{}, state.slug, state.slug, alertname, false)
+		b.sendResolved(ctx, logger, alert{}, state.slug, state.slug, alertname, false, ended)
 	}
 }
 

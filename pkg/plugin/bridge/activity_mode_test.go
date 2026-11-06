@@ -117,7 +117,7 @@ func TestNotifyOnlyAlertPushesFiringAndResolved(t *testing.T) {
 				t.Errorf("delivery log notified = %+v, want ok", e)
 			}
 
-			b.handleResolved(context.Background(), resolvedAlert())
+			b.handleResolved(context.Background(), resolvedAlert(), nil)
 
 			notifs, _ = m.requests(t, http.MethodPost, "/notifications")
 			if len(notifs) != 2 {
@@ -168,7 +168,7 @@ func TestFirstInstanceDecidesActivity(t *testing.T) {
 		t.Errorf("got %d notifications, want only the first instance's", len(notifs))
 	}
 
-	b.handleResolved(context.Background(), resolvedAlert())
+	b.handleResolved(context.Background(), resolvedAlert(), nil)
 	if notifs, _ := m.requests(t, http.MethodPost, "/notifications"); len(notifs) != 1 {
 		t.Errorf("got %d notifications with one instance still firing, want no resolved push yet", len(notifs))
 	}
@@ -197,7 +197,7 @@ func TestNotifyOnlyAckRepeatsAndResolveCancelsFirst(t *testing.T) {
 		t.Errorf("tags = %v, want [%s]", notifs[0]["tags"], slug)
 	}
 
-	b.handleResolved(context.Background(), resolvedAlert())
+	b.handleResolved(context.Background(), resolvedAlert(), nil)
 
 	cancels, cancelIdx := m.requests(t, http.MethodPost, "/notifications/receipts/cancel")
 	if len(cancels) != 1 || cancels[0]["tag"] != slug {
@@ -221,7 +221,7 @@ func TestActivityAlertWithoutAlsoNotifySkipsAckCancel(t *testing.T) {
 	b := newTestBridge(t, m.url, nil, cfg)
 
 	b.handleFiring(context.Background(), firingAlert(), nil)
-	b.handleResolved(context.Background(), resolvedAlert())
+	b.handleResolved(context.Background(), resolvedAlert(), nil)
 
 	if notifs, _ := m.requests(t, http.MethodPost, "/notifications"); len(notifs) != 0 {
 		t.Errorf("got %d notifications, want none", len(notifs))
