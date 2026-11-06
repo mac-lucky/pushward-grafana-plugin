@@ -637,7 +637,7 @@ func TestStopDoesNotWaitOutTheRateLimit(t *testing.T) {
 	t.Cleanup(srv.Close)
 	b := newQueueBridge(t, srv.URL, retractConfig())
 
-	b.queueRetract(slog.Default(), "HighCPU", makeSlug("HighCPU"))
+	endAndQueue(b, "HighCPU")
 	select {
 	case <-asked:
 	case <-time.After(5 * time.Second):
@@ -655,7 +655,7 @@ func TestRetractQueueFull(t *testing.T) {
 	dl := &recLog{}
 	b.deliveryLog = dl
 	for range retractQueueCap + 1 {
-		b.queueRetract(slog.Default(), "HighCPU", makeSlug("HighCPU"))
+		endAndQueue(b, "HighCPU")
 	}
 	if n := len(b.retracts); n != retractQueueCap {
 		t.Errorf("%d retracts queued, want %d", n, retractQueueCap)
@@ -684,5 +684,231 @@ func TestEndedIsBounded(t *testing.T) {
 	}
 	if _, ok := b.ended["0"]; ok {
 		t.Error("the oldest id survived")
+	}
+}
+
+// endAndQueue ends alertname's pushes and queues their retract, as the paths
+// without a resolved push do.
+func endAndQueue(b *Bridge, alertname string) {
+	b.mu.Lock()
+	b.endedOnce(alertCollapseID(alertname))
+	b.mu.Unlock()
+	b.queueRetract(slog.Default(), alertname, makeSlug(alertname))
+}
+
+// A queued retract never goes out after the alert fired again under its
+// collapse id: it would take the new push down. Neither one still waiting in
+// the queue nor one waiting out a 429.
+func TestQueuedRetractSparesAReFiredAlert(t *testing.T) {
+	refire := func(b *Bridge) {
+		slug := makeSlug("HighCPU")
+		b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false, false)
+	}
+
+	t.Run("still queued", func(t *testing.T) {
+		m := newMockServer(t, testutil.MockOptions{})
+		b := newTestBridge(t, m.url, nil, retractConfig())
+		endAndQueue(b, "HighCPU")
+		refire(b)
+		if r, _ := m.retracts(t, b); len(r) != 0 {
+			t.Errorf("got %d retracts after the alert fired again, want none", len(r))
+		}
+	})
+
+	t.Run("waiting out a 429", func(t *testing.T) {
+		url, asked, events := throttledOnce(t)
+		cfg := retractConfig()
+		cfg.Ack = false
+		b := newQueueBridge(t, url, cfg)
+
+		endAndQueue(b, "HighCPU")
+		<-asked
+		refire(b)
+		time.Sleep(time.Second) // past the Retry-After
+		if got := events(); got != "retract 429, push" {
+			t.Errorf("server saw %q, want no retract after the push", got)
+		}
+	})
+
+	// The alert fires and ends again while the first retract waits: that one
+	// is stopped, and the second end still takes the new push back.
+	t.Run("ended again while one waits", func(t *testing.T) {
+		url, asked, events := throttledOnce(t)
+		cfg := retractConfig()
+		cfg.Ack = false
+		b := newQueueBridge(t, url, cfg)
+
+		endAndQueue(b, "HighCPU")
+		<-asked
+		id := alertCollapseID("HighCPU")
+		b.mu.Lock() // the push and the end, before the first retract returns
+		delete(b.ended, id)
+		b.cancelRetract(errFiredAgain)
+		b.endedOnce(id)
+		b.mu.Unlock()
+		b.queueRetract(slog.Default(), "HighCPU", makeSlug("HighCPU"))
+
+		deadline := time.Now().Add(5 * time.Second)
+		for events() != "retract 429, retract" && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if got := events(); got != "retract 429, retract" {
+			t.Errorf("server saw %q, want the second end's retract", got)
+		}
+	})
+}
+
+// throttledOnce answers the first retract with a 429 asking for 300 ms (and
+// signals asked), every later one with 202, and pushes with 202. events lists
+// what it served, in order.
+func throttledOnce(t *testing.T) (url string, asked <-chan struct{}, events func() string) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []string
+	ask := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/notifications":
+			seen = append(seen, "push")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{}`))
+		case "/notifications/retract":
+			if len(seen) == 0 {
+				seen = append(seen, "retract 429")
+				close(ask)
+				w.Header().Set("Content-Type", "application/problem+json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"status":429,"code":"rate_limit.exceeded","retry_after_ms":300}`))
+				return
+			}
+			seen = append(seen, "retract")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"devices":1}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, ask, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.Join(seen, ", ")
+	}
+}
+
+// A queued retract that never got through leaves the id open, so the late
+// resolve of that alert tries again instead of doing nothing.
+func TestLateResolveRetriesAQueuedRetractThatFailed(t *testing.T) {
+	retractsOf := func(t *testing.T, m mockServer, b *Bridge, alertname string) int {
+		t.Helper()
+		bodies, _ := m.retracts(t, b)
+		n := 0
+		for _, body := range bodies {
+			if body["collapse_id"] == alertCollapseID(alertname) {
+				n++
+			}
+		}
+		return n
+	}
+	end := func(b *Bridge) {
+		b.active["HighCPU"] = trackedHighCPU("fp1")
+		b.Forget(context.Background(), makeSlug("HighCPU"))
+	}
+	lateResolve := func(b *Bridge) {
+		b.handleResolved(context.Background(), resolvedAlert(), nil)
+	}
+
+	t.Run("refused", func(t *testing.T) {
+		m := newMockServer(t, testutil.MockOptions{RetractStatus: http.StatusForbidden})
+		b := newTestBridge(t, m.url, nil, retractConfig())
+		end(b)
+		if n := retractsOf(t, m, b, "HighCPU"); n != 1 {
+			t.Fatalf("End made %d retracts, want 1", n)
+		}
+		lateResolve(b)
+		if n := retractsOf(t, m, b, "HighCPU"); n != 2 {
+			t.Errorf("got %d retracts in all, want the late resolve to try again", n)
+		}
+	})
+
+	t.Run("dropped from a full queue", func(t *testing.T) {
+		m := newMockServer(t, testutil.MockOptions{})
+		b := newTestBridge(t, m.url, nil, retractConfig())
+		for i := range retractQueueCap {
+			endAndQueue(b, fmt.Sprint("Alert", i))
+		}
+		end(b)
+		if n := retractsOf(t, m, b, "HighCPU"); n != 0 {
+			t.Fatalf("got %d retracts from a full queue, want none", n)
+		}
+		lateResolve(b)
+		if n := retractsOf(t, m, b, "HighCPU"); n != 1 {
+			t.Errorf("got %d retracts, want the late resolve to make one", n)
+		}
+	})
+
+	t.Run("reached no device", func(t *testing.T) {
+		none := 0
+		m := newMockServer(t, testutil.MockOptions{RetractDevices: &none})
+		b := newTestBridge(t, m.url, nil, retractConfig())
+		end(b)
+		retractsOf(t, m, b, "HighCPU")
+		lateResolve(b)
+		if n := retractsOf(t, m, b, "HighCPU"); n != 1 {
+			t.Errorf("got %d retracts, want 1: the first one went through", n)
+		}
+	})
+}
+
+// A retract queued while the plugin stops, or still queued when it stopped,
+// is dropped and shows in the delivery log.
+func TestRetractsDroppedAtStopAreRecorded(t *testing.T) {
+	asked := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case asked <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Retry-After", "60")
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"status":429,"code":"rate_limit.exceeded"}`))
+	}))
+	t.Cleanup(srv.Close)
+	cfg := retractConfig()
+	cfg.Ack = false
+	dl := &recLog{}
+	pw := pushward.NewClient(srv.URL, "hlk_x")
+	rc := pushward.NewClient(srv.URL, "hlk_x", pushward.WithRetryBudget(time.Nanosecond))
+	b := NewBridge(pw, rc, nopQuerier{}, nil, NewPoller(nopQuerier{}, pw, time.Hour), dl, nil, cfg)
+	t.Cleanup(b.Stop)
+
+	endAndQueue(b, "Busy") // the worker waits out its Retry-After
+	select {
+	case <-asked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the queued retract was never made")
+	}
+	endAndQueue(b, "Queued")
+	b.Stop()
+	endAndQueue(b, "Late")
+
+	for _, name := range []string{"Queued", "Late"} {
+		found := false
+		dl.mu.Lock()
+		for _, e := range dl.entries {
+			if e.slug == makeSlug(name) && e.action == "retract" && !e.ok && e.detail == "plugin stopping" {
+				found = true
+			}
+		}
+		dl.mu.Unlock()
+		if !found {
+			t.Errorf("no dropped retract recorded for %s", name)
+		}
+	}
+	if n := len(b.retracts); n != 0 {
+		t.Errorf("%d retracts left in the queue after Stop, want none", n)
 	}
 }

@@ -206,12 +206,20 @@ type Bridge struct {
 	// ended holds, with when, the collapse ids whose alert pushes this
 	// instance ended with RetractOnResolve on and has sent no firing push
 	// under since, so a later resolve under one (a late webhook, or another
-	// alert without a name) neither retracts again nor sends. At most
+	// alert without a name) neither retracts again nor sends. A queued
+	// retract that fails or is dropped forgets its id again. At most
 	// activeAlertCap; the oldest goes first.
 	ended    map[string]time.Time
 	retracts chan retractJob // see queueRetract
-	wg       sync.WaitGroup  // tracks in-flight async webhook processing
-	bgWg     sync.WaitGroup  // tracks sweeper/checker/retract-queue goroutines
+	// retracting is the collapse id of the queued retract being made, and
+	// cancelRetract stops it: a firing push under that id calls it first.
+	// retractsClosed is set once the queue stopped taking retracts.
+	retracting     string
+	cancelRetract  context.CancelCauseFunc
+	retractsClosed bool
+
+	wg       sync.WaitGroup // tracks in-flight async webhook processing
+	bgWg     sync.WaitGroup // tracks sweeper/checker/retract-queue goroutines
 	capDrops *syncx.DropCounter
 
 	stop     context.CancelFunc // cancels the sweeper/checker/retract-queue context
@@ -266,18 +274,23 @@ type repeatSample struct {
 	at     time.Time
 }
 
-// retractJob is a queued retract of an alert's push (see queueRetract).
+// retractJob is a queued retract of an alert's push (see queueRetract). mark
+// is the ended entry of its collapse id it was queued under.
 type retractJob struct {
 	logger         *slog.Logger
 	alertname, tag string
-	deadline       time.Time
+	mark, deadline time.Time
 }
+
+// errFiredAgain stops a queued retract whose alert fired again.
+var errFiredAgain = errors.New("the alert fired again")
 
 // NewBridge constructs the bridge and starts its background sweeper,
 // alertmanager backstop and retract queue. Call Stop to tear them down. p is the per-alert poller
 // (constructed by the caller with the same metrics querier); gr may be nil to
 // disable PromQL auto-extract and the alertmanager backstop; dl and m may be nil.
-// rc makes the retracts and should not retry (see retractTimeout).
+// rc makes the retracts a resolve waits on and should not retry (see
+// retractTimeout); the queued ones go through pw, which waits out a 429.
 func NewBridge(
 	pw *pushward.Client,
 	rc *pushward.Client,
@@ -321,7 +334,9 @@ func NewBridge(
 }
 
 // Stop cancels the background sweeper/checker and the retract queue (a retract
-// in flight is abandoned, the queued ones are dropped), stops all pollers, and
+// in flight is abandoned, the queued ones and any queued later are dropped and
+// recorded: after a settings save the next instance already serves, and a
+// retract made now could take down a firing push it sent), stops all pollers, and
 // waits for in-flight webhook processing and background goroutines to finish.
 // Safe to call multiple times.
 func (b *Bridge) Stop() {
@@ -1214,7 +1229,7 @@ func (b *Bridge) sendResolved(ctx context.Context, logger *slog.Logger, a alert,
 	b.cancelAck(ctx, logger, alertname, tag, b.ackFor(notifyOnly))
 	if retract && b.cfg.RetractOnResolve {
 		rctx, cancel := context.WithTimeout(ctx, retractTimeout)
-		retracted := b.retractAlert(rctx, b.retractClient, logger, alertname, tag)
+		retracted, _ := b.retractAlert(rctx, b.retractClient, logger, alertname, tag)
 		cancel()
 		if retracted {
 			return
@@ -1238,6 +1253,9 @@ func (b *Bridge) sendAlertNotification(ctx context.Context, logger *slog.Logger,
 	if !resolved {
 		b.mu.Lock()
 		delete(b.ended, req.CollapseID) // a firing push is up under it again
+		if b.retracting == req.CollapseID {
+			b.cancelRetract(errFiredAgain)
+		}
 		b.mu.Unlock()
 	}
 
@@ -1384,26 +1402,49 @@ func (b *Bridge) cancelAck(ctx context.Context, logger *slog.Logger, alertname, 
 
 // retractAlert takes back the pushes shown under the alert's collapse id on
 // every device of the account with c and reports whether the retract went to
-// any device. Bounded by ctx; a failure is only logged.
-func (b *Bridge) retractAlert(ctx context.Context, c *pushward.Client, logger *slog.Logger, alertname, tag string) bool {
+// any device. Bounded by ctx; a failure is logged and returned.
+func (b *Bridge) retractAlert(ctx context.Context, c *pushward.Client, logger *slog.Logger, alertname, tag string) (bool, error) {
 	n, err := c.RetractNotifications(ctx, alertCollapseID(alertname))
 	if err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			err = cause // say why ctx ended, not just that it did
+		}
 		logger.Warn("failed to retract the alert push", "error", err)
 		b.record(alertname, tag, "retract", false, err.Error())
-		return false
+		return false, err
 	}
 	b.record(alertname, tag, "retracted", true, strconv.Itoa(n))
-	return n > 0
+	return n > 0, nil
 }
 
 // queueRetract hands the retract of an alert's push to the retract queue,
 // for the paths that end an alert without a resolved push to fall back on
 // (untracked resolve, sweep, End, a resolve that overtook the firing push).
 // They never wait on it, and its throttled retracts are tried again instead
-// of lost. A full queue drops the retract, logged.
+// of lost. The caller marked the id ended; a firing push that cleared the mark
+// since keeps its push. A full or stopped queue drops the retract, logged.
 func (b *Bridge) queueRetract(logger *slog.Logger, alertname, tag string) {
-	select {
-	case b.retracts <- retractJob{logger: logger, alertname: alertname, tag: tag, deadline: time.Now().Add(retractWait)}:
+	id := alertCollapseID(alertname)
+	b.mu.Lock()
+	mark, ok := b.ended[id]
+	queued := false
+	if ok && !b.retractsClosed {
+		select {
+		case b.retracts <- retractJob{logger: logger, alertname: alertname, tag: tag, mark: mark, deadline: time.Now().Add(retractWait)}:
+			queued = true
+		default:
+			delete(b.ended, id) // never tried, so a later resolve may
+		}
+	}
+	closed := b.retractsClosed
+	b.mu.Unlock()
+	switch {
+	case queued:
+	case !ok:
+		logger.Info("the alert fired again, its retract is dropped")
+	case closed:
+		logger.Warn("plugin stopping, the alert push stays up")
+		b.record(alertname, tag, "retract", false, "plugin stopping")
 	default:
 		logger.Warn("retract queue full, the alert push stays up", "cap", retractQueueCap)
 		b.record(alertname, tag, "retract", false, "retract queue full")
@@ -1421,22 +1462,62 @@ func (b *Bridge) startRetracts(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				if n := len(b.retracts); n > 0 {
-					slog.Warn("stopping with retracts still queued, their alert pushes stay up", "count", n)
-				}
+				b.closeRetracts()
 				return
 			case j := <-b.retracts:
+				if ctx.Err() != nil { // Stop came with j ready
+					b.closeRetracts(j)
+					return
+				}
 				b.runRetract(ctx, j)
 			}
 		}
 	}()
 }
 
-// runRetract makes the queued retract j, given up at its deadline.
+// closeRetracts stops the queue taking retracts and drops pending and the
+// queued ones, recorded. Under b.mu, so a retract queued at the same time is
+// either drained here or finds the queue closed.
+func (b *Bridge) closeRetracts(pending ...retractJob) {
+	b.mu.Lock()
+	b.retractsClosed = true
+	for len(b.retracts) > 0 {
+		pending = append(pending, <-b.retracts)
+	}
+	b.mu.Unlock()
+	for _, j := range pending {
+		j.logger.Warn("plugin stopping with the retract still queued, the alert push stays up")
+		b.record(j.alertname, j.tag, "retract", false, "plugin stopping")
+	}
+}
+
+// runRetract makes the queued retract j, given up at its deadline. It is
+// skipped, or stopped while it waits out a 429, once a firing push went out
+// under its collapse id: it would take that push down. One that fails forgets
+// the id, so a later resolve tries again.
 func (b *Bridge) runRetract(ctx context.Context, j retractJob) {
+	id := alertCollapseID(j.alertname)
 	ctx, cancel := context.WithDeadline(ctx, j.deadline)
 	defer cancel()
-	b.retractAlert(ctx, b.pwClient, j.logger, j.alertname, j.tag)
+	ctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	b.mu.Lock()
+	if !b.ended[id].Equal(j.mark) {
+		b.mu.Unlock()
+		j.logger.Info("the alert fired again, its retract is dropped")
+		return
+	}
+	b.retracting, b.cancelRetract = id, stop
+	b.mu.Unlock()
+
+	_, err := b.retractAlert(ctx, b.pwClient, j.logger, j.alertname, j.tag)
+
+	b.mu.Lock()
+	b.retracting, b.cancelRetract = "", nil
+	if err != nil && b.ended[id].Equal(j.mark) {
+		delete(b.ended, id)
+	}
+	b.mu.Unlock()
 }
 
 // endedOnce records that this instance ended the alert pushes under
