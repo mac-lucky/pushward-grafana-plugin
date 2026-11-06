@@ -204,15 +204,16 @@ type Bridge struct {
 	mu     sync.Mutex
 	active map[string]*alertState
 	// ended holds, with when, the collapse ids whose alert pushes this
-	// instance ended with RetractOnResolve on and has sent no firing push
-	// under since, so a later resolve under one (a late webhook, or another
-	// alert without a name) neither retracts again nor sends. A queued
-	// retract that fails or is dropped forgets its id again. At most
-	// activeAlertCap; the oldest goes first.
+	// instance ended with RetractOnResolve on and has taken no firing alert
+	// to push under since (see firedAgain), so a later resolve under one (a
+	// late webhook, or another alert without a name) neither retracts again
+	// nor sends. A queued retract that fails or is dropped forgets its id
+	// again. At most activeAlertCap; the oldest goes first.
 	ended    map[string]time.Time
 	retracts chan retractJob // see queueRetract
 	// retracting is the collapse id of the queued retract being made, and
-	// cancelRetract stops it: a firing push under that id calls it first.
+	// cancelRetract stops it: a firing alert pushed under that id calls it
+	// first.
 	// retractsClosed is set once the queue stopped taking retracts.
 	retracting     string
 	cancelRetract  context.CancelCauseFunc
@@ -509,6 +510,11 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 			return
 		}
 		notifyOnly = !b.wantsActivity(a)
+		if notifyOnly || b.cfg.AlsoNotify {
+			// A firing push follows (for a Live Activity alert, only after
+			// the activity calls), so no queued retract may go out first.
+			b.firedAgain(alertCollapseID(alertname))
+		}
 		b.active[mapKey] = &alertState{
 			slug: slug, alertname: a.Labels["alertname"], ruleUID: b.ruleUIDFor(a),
 			seriesLabel: seriesLabel, primary: a.Annotations[annPrimarySeries],
@@ -825,8 +831,10 @@ func (b *Bridge) repeatValues(mapKey string) map[string]float64 {
 
 // handleResolved processes one resolved alert. noRetract holds the collapse
 // ids its payload must not retract (see ProcessWebhook). A resolve under an
-// id this instance ended already (Bridge.ended) retracts and sends nothing
-// under it, so a payload retracts each id once.
+// id this instance ended already (Bridge.ended) sends nothing under it, so a
+// payload retracts each id once; when that end's queued retract then fails,
+// such a resolve (another alert without a name) has no resolved push to fall
+// back on.
 func (b *Bridge) handleResolved(ctx context.Context, a alert, noRetract map[string]bool) {
 	if a.Fingerprint == "" {
 		slog.Warn("alert has empty fingerprint, skipping")
@@ -1252,10 +1260,7 @@ func (b *Bridge) sendAlertNotification(ctx context.Context, logger *slog.Logger,
 	}
 	if !resolved {
 		b.mu.Lock()
-		delete(b.ended, req.CollapseID) // a firing push is up under it again
-		if b.retracting == req.CollapseID {
-			b.cancelRetract(errFiredAgain)
-		}
+		b.firedAgain(req.CollapseID)
 		b.mu.Unlock()
 	}
 
@@ -1518,6 +1523,16 @@ func (b *Bridge) runRetract(ctx context.Context, j retractJob) {
 		delete(b.ended, id)
 	}
 	b.mu.Unlock()
+}
+
+// firedAgain forgets that this instance ended the alert pushes under
+// collapse id and stops a queued retract of them: a firing push goes out
+// under id again. The caller holds b.mu.
+func (b *Bridge) firedAgain(id string) {
+	delete(b.ended, id)
+	if b.retracting == id {
+		b.cancelRetract(errFiredAgain)
+	}
 }
 
 // endedOnce records that this instance ended the alert pushes under

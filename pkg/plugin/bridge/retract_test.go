@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -756,6 +757,87 @@ func TestQueuedRetractSparesAReFiredAlert(t *testing.T) {
 			t.Errorf("server saw %q, want the second end's retract", got)
 		}
 	})
+}
+
+// An alert with a Live Activity fires again while its end's retract waits
+// out a 429: its firing push only follows the activity create, and the
+// retract must not go out in between. The create is held for as long as
+// that retract runs, so without the stop the retract always goes out first.
+func TestQueuedRetractStopsWhenTheAlertFiresAgainBeforeItsPush(t *testing.T) {
+	var bp atomic.Pointer[Bridge]
+	var mu sync.Mutex
+	var seen []string
+	ev := func(s string) {
+		mu.Lock()
+		seen = append(seen, s)
+		mu.Unlock()
+	}
+	ask := make(chan struct{})
+	retracts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/activities":
+			ev("create")
+			for b := bp.Load(); ; time.Sleep(5 * time.Millisecond) {
+				b.mu.Lock()
+				busy := b.retracting != ""
+				b.mu.Unlock()
+				if !busy {
+					break
+				}
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		case strings.HasPrefix(r.URL.Path, "/activities/"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		case r.URL.Path == "/notifications":
+			ev("push")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{}`))
+		case r.URL.Path == "/notifications/retract":
+			mu.Lock()
+			retracts++
+			first := retracts == 1
+			mu.Unlock()
+			if first {
+				ev("retract 429")
+				close(ask)
+				w.Header().Set("Content-Type", "application/problem+json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"status":429,"code":"rate_limit.exceeded","retry_after_ms":300}`))
+				return
+			}
+			ev("retract")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"devices":1}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := retractConfig()
+	cfg.Ack = false
+	b := newQueueBridge(t, srv.URL, cfg)
+	bp.Store(b)
+
+	b.mu.Lock()
+	b.active["HighCPU"] = trackedHighCPU("fp1")
+	b.mu.Unlock()
+	b.Forget(context.Background(), makeSlug("HighCPU"))
+	<-ask
+
+	raw, _ := json.Marshal(webhookPayload{Alerts: []alert{firingAlert()}})
+	if err := b.ProcessWebhook(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	b.wg.Wait()
+	mu.Lock()
+	got := strings.Join(seen, ", ")
+	mu.Unlock()
+	if got != "retract 429, create, push" {
+		t.Errorf("server saw %q, want the waiting retract stopped before the push", got)
+	}
 }
 
 // throttledOnce answers the first retract with a 429 asking for 300 ms (and
