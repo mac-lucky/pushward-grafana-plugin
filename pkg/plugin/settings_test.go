@@ -119,3 +119,12 @@ func TestActivityModeSettings(t *testing.T) {
 		})
 	}
 }
+
+func TestRetractOnResolveSetting(t *testing.T) {
+	cases := map[string]bool{`{}`: false, `{"retractOnResolve":false}`: false, `{"retractOnResolve":true}`: true}
+	for jsonData, want := range cases {
+		if got := loadSettings(t, jsonData, nil).RetractOnResolve; got != want {
+			t.Errorf("%s: RetractOnResolve = %v, want %v", jsonData, got, want)
+		}
+	}
+}

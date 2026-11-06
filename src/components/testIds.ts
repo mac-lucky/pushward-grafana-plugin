@@ -23,6 +23,7 @@ export const testIds = {
     ackEnabled: 'data-testid ac-ack-enabled',
     ackRepeat: 'data-testid ac-ack-repeat',
     ackExpire: 'data-testid ac-ack-expire',
+    retractOnResolve: 'data-testid ac-retract-on-resolve',
     widgets: 'data-testid ac-widgets',
     widgetsExample: 'data-testid ac-widgets-example',
     submit: 'data-testid ac-submit-form',

@@ -108,6 +108,10 @@ type Settings struct {
 	AckRepeat int
 	AckExpire int
 
+	// RetractOnResolve takes an alert's push back from the devices when the
+	// alert resolves instead of sending a resolved push. Off by default.
+	RetractOnResolve bool
+
 	// Widgets are the scheduled-PromQL widget specs published to the server
 	// widget API. Empty when no widgets are configured (the engine stays off).
 	Widgets []widgets.WidgetConfig
@@ -152,6 +156,7 @@ type rawJSONData struct {
 	AckEnabled      *bool  `json:"ackEnabled"`
 	AckRepeat       *int   `json:"ackRepeatSeconds"`
 	AckExpire       *int   `json:"ackExpireSeconds"`
+	Retract         *bool  `json:"retractOnResolve"`
 	// Widgets is the raw widget array, parsed + validated by the widgets
 	// package. Kept as RawMessage so a malformed entry yields a precise
 	// per-widget error instead of failing the whole jsonData unmarshal.
@@ -218,6 +223,9 @@ func LoadSettings(s backend.AppInstanceSettings) (*Settings, error) {
 	}
 	if raw.AckExpire != nil && *raw.AckExpire > 0 {
 		out.AckExpire = min(max(*raw.AckExpire, minAckExpire), maxAckExpire)
+	}
+	if raw.Retract != nil {
+		out.RetractOnResolve = *raw.Retract
 	}
 
 	// Parse widgets out of band: a malformed entry must not fail the whole

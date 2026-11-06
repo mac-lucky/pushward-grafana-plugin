@@ -77,6 +77,10 @@ const (
 	// resolve, so a slow cancel never holds up the resolved push behind it.
 	ackCancelTimeout = 5 * time.Second
 
+	// retractTimeout bounds taking an alert's push back. The server allows
+	// few retracts a minute, so a 429 wait is cut short rather than waited out.
+	retractTimeout = 5 * time.Second
+
 	// What a push says in place of the alert when it cannot be encrypted.
 	contentFreeFiring   = "Grafana alert firing"
 	contentFreeResolved = "Grafana alert resolved"
@@ -165,6 +169,11 @@ type Config struct {
 	Ack       bool
 	AckRepeat int
 	AckExpire int
+	// RetractOnResolve takes the push of a resolved alert back from every
+	// device of the account (its collapse id) instead of sending the resolved
+	// push, which goes out only when the retract reaches no device. The paths
+	// that end an alert without a resolved push retract it too.
+	RetractOnResolve bool
 	// E2EKey seals the title, subtitle and body of the AlsoNotify pushes.
 	// E2EKeyError is set instead when a key is configured but unusable: the
 	// pushes then go out without the alert text (see SealNotification).
@@ -509,7 +518,7 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 	if isNew && b.cfg.AlsoNotify {
 		defer func() {
 			b.sendAlertNotification(ctx, logger, a, slug, slug, alertname, false, b.ackEnabled())
-			b.cancelAckIfGone(ctx, logger, mapKey, alertname, slug, b.ackEnabled())
+			b.cancelAckIfGone(ctx, logger, mapKey, alertname, slug, false)
 		}()
 	}
 
@@ -655,15 +664,17 @@ func (b *Bridge) storeQuery(mapKey, expr, refID string) (string, string) {
 // resolve can stop its repeats.
 func (b *Bridge) notifyFiring(ctx context.Context, logger *slog.Logger, a alert, mapKey, slug, alertname string) {
 	b.sendAlertNotification(ctx, logger, a, "", slug, alertname, false, b.ackOn())
-	b.cancelAckIfGone(ctx, logger, mapKey, alertname, slug, b.ackOn())
+	b.cancelAckIfGone(ctx, logger, mapKey, alertname, slug, true)
 }
 
 // cancelAckIfGone stops the repeats of the firing push just sent for the
-// alert under mapKey when the alert is no longer tracked: a resolve handled
-// while that push was still pending had nothing to cancel yet. ack says
-// whether the push asked for acknowledge at all.
-func (b *Bridge) cancelAckIfGone(ctx context.Context, logger *slog.Logger, mapKey, alertname, slug string, ack bool) {
-	if !ack {
+// alert under mapKey, and with RetractOnResolve takes the push back, when the
+// alert is no longer tracked: a resolve handled while that push was still
+// pending had nothing to cancel yet. notifyOnly says whether the alert has no
+// Live Activity.
+func (b *Bridge) cancelAckIfGone(ctx context.Context, logger *slog.Logger, mapKey, alertname, slug string, notifyOnly bool) {
+	ack, retract := b.ackFor(notifyOnly), b.retractFor(notifyOnly)
+	if !ack && !retract {
 		return
 	}
 	b.mu.Lock()
@@ -671,6 +682,7 @@ func (b *Bridge) cancelAckIfGone(ctx context.Context, logger *slog.Logger, mapKe
 	b.mu.Unlock()
 	if !tracked {
 		b.cancelAck(ctx, logger, alertname, slug, ack)
+		b.retractDetached(ctx, logger, alertname, slug, retract)
 	}
 }
 
@@ -777,9 +789,12 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 		// the instance list there is no telling whether this was the last
 		// instance: with a contact point grouped per instance, one instance
 		// resolving after a settings save also stops the repeats of those
-		// still firing. Accepted; the next firing webhook notifies again.
-		// The labels tell which kind of push it was, if one was sent.
-		b.cancelAck(ctx, logger, alertname, slug, b.ackFor(!b.wantsActivity(a)))
+		// still firing, and a retract takes their push back too. Accepted;
+		// the next firing webhook notifies again. The labels tell which kind
+		// of push it was, if one was sent.
+		notifyOnly := !b.wantsActivity(a)
+		b.cancelAck(ctx, logger, alertname, slug, b.ackFor(notifyOnly))
+		b.retractDetached(ctx, logger, alertname, slug, b.retractFor(notifyOnly))
 		return
 	}
 
@@ -804,8 +819,7 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 	b.mu.Unlock()
 
 	if notifyOnly {
-		b.cancelAck(ctx, logger, alertname, slug, b.ackOn())
-		b.sendAlertNotification(ctx, logger, a, "", slug, alertname, true, false)
+		b.sendResolved(ctx, logger, a, "", slug, alertname, true)
 		return
 	}
 
@@ -859,8 +873,7 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert) {
 		if !ended {
 			linkSlug = ""
 		}
-		b.cancelAck(ctx, logger, alertname, slug, b.ackEnabled())
-		b.sendAlertNotification(ctx, logger, a, linkSlug, slug, alertname, true, false)
+		b.sendResolved(ctx, logger, a, linkSlug, slug, alertname, false)
 	}
 }
 
@@ -1087,7 +1100,7 @@ func buildAlertNotification(a alert, slug, alertname string, resolved bool, leve
 		Title:      text.Truncate(alertname, maxNotifyTitleRunes),
 		Subtitle:   subtitle,
 		ThreadID:   "grafana",
-		CollapseID: text.SlugHash("grafana", alertname, 6),
+		CollapseID: alertCollapseID(alertname),
 		Source:     "grafana",
 		Level:      level,
 		Push:       pushward.BoolPtr(true),
@@ -1117,6 +1130,29 @@ func buildAlertNotification(a alert, slug, alertname string, resolved bool, leve
 		}
 	}
 	return req
+}
+
+// alertCollapseID is the collapse id of an alert's pushes, shared by its
+// firing and resolved push and what a retract takes back. Anonymous alerts
+// share the fallback name, and with it one id.
+func alertCollapseID(alertname string) string {
+	if alertname == "" {
+		alertname = "Grafana Alert"
+	}
+	return text.SlugHash("grafana", alertname, 6)
+}
+
+// sendResolved ends what the firing push of an alert left on the devices:
+// it stops the acknowledge repeats first, then with RetractOnResolve takes
+// the push back and sends the resolved push only when the retract reached no
+// device. Never both: the retract lands late and would take the resolved
+// push with it. notifyOnly says whether the alert has no Live Activity.
+func (b *Bridge) sendResolved(ctx context.Context, logger *slog.Logger, a alert, slug, tag, alertname string, notifyOnly bool) {
+	b.cancelAck(ctx, logger, alertname, tag, b.ackFor(notifyOnly))
+	if b.cfg.RetractOnResolve && b.retractAlert(ctx, logger, alertname, tag) {
+		return
+	}
+	b.sendAlertNotification(ctx, logger, a, slug, tag, alertname, true, false)
 }
 
 // sendAlertNotification sends a normal push notification for an alert. It is
@@ -1214,6 +1250,12 @@ func (b *Bridge) ackFor(notifyOnly bool) bool {
 	return b.ackEnabled()
 }
 
+// retractFor is ackFor for RetractOnResolve: whether the alert sent a push
+// that a retract would take back.
+func (b *Bridge) retractFor(notifyOnly bool) bool {
+	return b.cfg.RetractOnResolve && (notifyOnly || b.cfg.AlsoNotify)
+}
+
 // ackRefusal returns why the server refused an acknowledged send, when sending
 // it again without acknowledge can get it through: the receipt cap, receipts
 // switched off, the acknowledge rules, or the pw_ack button pushing an
@@ -1265,6 +1307,38 @@ func (b *Bridge) cancelAck(ctx context.Context, logger *slog.Logger, alertname, 
 		return
 	}
 	b.record(alertname, tag, "ack-canceled", true, strconv.Itoa(n))
+}
+
+// retractAlert takes back the pushes shown under the alert's collapse id on
+// every device of the account and reports whether the retract went to any
+// device. Bounded by retractTimeout; a failure is only logged.
+func (b *Bridge) retractAlert(ctx context.Context, logger *slog.Logger, alertname, tag string) bool {
+	ctx, cancel := context.WithTimeout(ctx, retractTimeout)
+	defer cancel()
+	n, err := b.pwClient.RetractNotifications(ctx, alertCollapseID(alertname))
+	if err != nil {
+		logger.Warn("failed to retract the alert push", "error", err)
+		b.record(alertname, tag, "retract", false, err.Error())
+		return false
+	}
+	b.record(alertname, tag, "retracted", true, strconv.Itoa(n))
+	return n > 0
+}
+
+// retractDetached runs retractAlert on its own goroutine, cut loose from
+// ctx's deadline, for the paths that end an alert without a resolved push:
+// a 429 wait there must not spend the webhook's budget. retract false makes
+// no call. Stop waits for it.
+func (b *Bridge) retractDetached(ctx context.Context, logger *slog.Logger, alertname, tag string, retract bool) {
+	if !retract {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	b.bgWg.Add(1)
+	go func() {
+		defer b.bgWg.Done()
+		b.retractAlert(ctx, logger, alertname, tag)
+	}()
 }
 
 // SealNotification moves req's title, subtitle and body into an end-to-end
@@ -1359,7 +1433,10 @@ func (b *Bridge) Forget(ctx context.Context, slug string) bool {
 		// the activity is what closes the resurrection window.
 		b.poller.StopAndWait(slug)
 	}
-	b.cancelAck(ctx, slog.With("slug", slug), alertname, slug, b.ackEnabled())
+	logger := slog.With("slug", slug)
+	b.cancelAck(ctx, logger, alertname, slug, b.ackEnabled())
+	// Only a tracked alert says which push to take back.
+	b.retractDetached(ctx, logger, alertname, slug, key != "" && b.retractFor(false))
 	return key != ""
 }
 
@@ -1429,7 +1506,9 @@ func (b *Bridge) sweepStale(ctx context.Context, maxAge time.Duration) {
 	b.mu.Unlock()
 	// Outside b.mu: each cancel is a network call.
 	for _, st := range swept {
-		b.cancelAck(ctx, slog.With("alertname", st.alertname, "slug", st.slug), st.alertname, st.slug, b.ackFor(st.notifyOnly))
+		logger := slog.With("alertname", st.alertname, "slug", st.slug)
+		b.cancelAck(ctx, logger, st.alertname, st.slug, b.ackFor(st.notifyOnly))
+		b.retractDetached(ctx, logger, st.alertname, st.slug, b.retractFor(st.notifyOnly))
 	}
 }
 
@@ -1506,8 +1585,7 @@ func (b *Bridge) checkAlertStates(ctx context.Context) {
 			// No activity to end: send the resolved push the missed webhook
 			// would have, with only the alert name to go on.
 			logger := slog.With("alertname", e.state.alertname, "slug", e.state.slug)
-			b.cancelAck(ctx, logger, e.state.alertname, e.state.slug, b.ackOn())
-			b.sendAlertNotification(ctx, logger, alert{}, "", e.state.slug, e.state.alertname, true, false)
+			b.sendResolved(ctx, logger, alert{}, "", e.state.slug, e.state.alertname, true)
 			continue
 		}
 
@@ -1559,8 +1637,7 @@ func (b *Bridge) endAlertActivity(ctx context.Context, alertname string, state *
 	// the alert name (no instance/summary) - an empty alert yields the plain
 	// "Grafana"/"Resolved" notification.
 	if b.cfg.AlsoNotify {
-		b.cancelAck(ctx, logger, alertname, state.slug, b.ackEnabled())
-		b.sendAlertNotification(ctx, logger, alert{}, state.slug, state.slug, alertname, true, false)
+		b.sendResolved(ctx, logger, alert{}, state.slug, state.slug, alertname, false)
 	}
 }
 

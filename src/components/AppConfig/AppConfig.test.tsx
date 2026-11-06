@@ -1,6 +1,7 @@
 import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { PluginType } from '@grafana/data';
+import { NEVER } from 'rxjs';
 import AppConfig, { AppConfigProps } from './AppConfig';
 import { testIds } from 'components/testIds';
 
@@ -8,11 +9,12 @@ import { testIds } from 'components/testIds';
 // getBackendSrv, used on submit + the mount effect that fetches /config) to keep
 // the config form a pure render in tests.
 const mockGet = jest.fn();
+const mockFetch = jest.fn();
 jest.mock('@grafana/runtime', () => ({
   ...jest.requireActual('@grafana/runtime'),
   DataSourcePicker: () => <div data-testid="mock-datasource-picker" />,
   getBackendSrv: () => ({
-    fetch: jest.fn(),
+    fetch: mockFetch,
     get: mockGet,
   }),
 }));
@@ -138,6 +140,27 @@ describe('Components/AppConfig', () => {
     render(<AppConfig plugin={on} query={props.query} />);
     expect(screen.getByTestId(testIds.appConfig.priorityFromSeverity)).toBeChecked();
     expect(screen.getByText(/for warning alerts, unknown severities/i)).toBeInTheDocument();
+  });
+
+  test('retract on resolve follows the notification switch, defaults off and is saved', () => {
+    const { unmount } = render(<AppConfig plugin={props.plugin} query={props.query} />);
+    expect(screen.queryByTestId(testIds.appConfig.retractOnResolve)).not.toBeInTheDocument();
+    unmount();
+
+    mockFetch.mockReturnValue(NEVER);
+    const plugin = { meta: { ...props.plugin.meta, jsonData: { alsoNotify: true } } };
+    // @ts-expect-error - addConfigPage()/setChannelSupport() aren't needed for this test
+    render(<AppConfig plugin={plugin} query={props.query} />);
+    const retract = screen.getByTestId(testIds.appConfig.retractOnResolve);
+    expect(retract).not.toBeChecked();
+
+    fireEvent.click(retract);
+    fireEvent.submit(screen.getByTestId(testIds.appConfig.container));
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ jsonData: expect.objectContaining({ retractOnResolve: true }) }),
+      })
+    );
   });
 
   test('number fields keep whole numbers only', () => {

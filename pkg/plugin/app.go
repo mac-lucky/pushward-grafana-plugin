@@ -133,6 +133,7 @@ func NewApp(ctx context.Context, settings backend.AppInstanceSettings) (instance
 		Ack:                  s.Ack,
 		AckRepeat:            s.AckRepeat,
 		AckExpire:            s.AckExpire,
+		RetractOnResolve:     s.RetractOnResolve,
 		E2EKey:               s.E2EKey,
 		E2EKeyError:          s.E2EError,
 	})

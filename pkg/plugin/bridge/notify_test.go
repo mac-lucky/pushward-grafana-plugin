@@ -514,6 +514,13 @@ func (m mockServer) rawNotifications(t *testing.T) []string {
 	return out
 }
 
+// retracts returns the recorded retracts once the detached ones are done.
+func (m mockServer) retracts(t *testing.T, b *Bridge) (bodies []map[string]any, idx []int) {
+	t.Helper()
+	b.bgWg.Wait()
+	return m.requests(t, http.MethodPost, "/notifications/retract")
+}
+
 func ackConfig() Config {
 	return Config{AlsoNotify: true, Ack: true, AckRepeat: 120, AckExpire: 1800, SeverityLabel: "severity", DefaultSeverity: "warning"}
 }
@@ -578,6 +585,9 @@ func TestAckFiringRepeatsAndResolveCancelsFirst(t *testing.T) {
 	}
 	if e := dl.find("ack-canceled"); e == nil || !e.ok || e.detail != "1" {
 		t.Errorf("delivery log ack-canceled = %+v, want ok with count 1", e)
+	}
+	if r, _ := m.retracts(t, b); len(r) != 0 {
+		t.Errorf("got %d retracts with retract on resolve off, want none", len(r))
 	}
 }
 
@@ -728,6 +738,9 @@ func TestAckCanceledOnEveryEnd(t *testing.T) {
 
 			tc.end(b)
 
+			if r, _ := m.retracts(t, b); len(r) != 0 {
+				t.Errorf("got %d retracts with retract on resolve off, want none", len(r))
+			}
 			cancels, cancelIdx := m.requests(t, http.MethodPost, "/notifications/receipts/cancel")
 			if len(cancels) != 1 || cancels[0]["tag"] != slug {
 				t.Fatalf("cancel requests = %v, want one for tag %s", cancels, slug)
@@ -932,6 +945,9 @@ func TestAckCanceledWhenResolveOvertakesFiringPush(t *testing.T) {
 	dl.mu.Unlock()
 	if !stopped {
 		t.Error("the repeats of the late firing push were never stopped")
+	}
+	if r, _ := m.retracts(t, b); len(r) != 0 {
+		t.Errorf("got %d retracts with retract on resolve off, want none", len(r))
 	}
 }
 

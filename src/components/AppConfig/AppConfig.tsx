@@ -58,6 +58,7 @@ export type AppPluginSettings = {
   ackEnabled?: boolean;
   ackRepeatSeconds?: number;
   ackExpireSeconds?: number;
+  retractOnResolve?: boolean;
   widgets?: WidgetConfig[];
 };
 
@@ -81,6 +82,7 @@ const DEFAULTS: Required<AppPluginSettings> = {
   ackEnabled: false,
   ackRepeatSeconds: 300,
   ackExpireSeconds: 3600,
+  retractOnResolve: false,
   widgets: [],
 };
 
@@ -210,6 +212,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     ackEnabled: jsonData?.ackEnabled ?? DEFAULTS.ackEnabled,
     ackRepeatSeconds: jsonData?.ackRepeatSeconds ?? DEFAULTS.ackRepeatSeconds,
     ackExpireSeconds: jsonData?.ackExpireSeconds ?? DEFAULTS.ackExpireSeconds,
+    retractOnResolve: jsonData?.retractOnResolve ?? DEFAULTS.retractOnResolve,
     apiKey: '',
     isApiKeySet: Boolean(secureJsonFields?.apiKey),
     isWebhookTokenSet: Boolean(secureJsonFields?.webhookToken),
@@ -388,6 +391,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         ackEnabled: state.ackEnabled,
         ackRepeatSeconds: state.ackRepeatSeconds,
         ackExpireSeconds: state.ackExpireSeconds,
+        retractOnResolve: state.retractOnResolve,
         widgets,
       },
       secureJsonData: Object.keys(secureJsonData).length > 0 ? secureJsonData : undefined,
@@ -655,6 +659,17 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
                 </Field>
               </>
             )}
+
+            <Field
+              label="Retract on resolve"
+              description="Removes the alert's notification from your devices when it resolves, instead of sending Resolved. Apple Watch, and PushWard on iPhone, iPad or Mac before 1.20, keep the alert."
+            >
+              <Switch
+                data-testid={testIds.appConfig.retractOnResolve}
+                value={state.retractOnResolve}
+                onChange={(e) => setState({ ...state, retractOnResolve: e.currentTarget.checked })}
+              />
+            </Field>
           </>
         )}
 
