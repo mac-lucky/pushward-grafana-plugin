@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.15.0
+
+- New setting **Retract on resolve** under **Also send a push notification**, off by default. When the last instance of an alert resolves, its push notification is taken off your devices instead of a "Resolved" push replacing it. If PushWard could reach no device, the retract fails, or the Live Activity still shows the alert firing, the "Resolved" push goes out as before. An alert that ends without a resolve (the stale sweep, ending it from the Activities page, or a resolve after a settings save restarted the plugin) has its notification taken back too. It works on PushWard 1.20 or later on iPhone, iPad and Mac and on Android; Apple Watch and an app that was force-quit keep the notification. Alerts without an `alertname` label share one notification, so resolving one takes the others back as well.
+
 ## 0.14.2
 
 - The backend is now built with Go 1.27; nothing changes in how the plugin looks or behaves.
