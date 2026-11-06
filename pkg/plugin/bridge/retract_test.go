@@ -3,12 +3,16 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/mac-lucky/pushward-integrations/shared/pushward"
 	"github.com/mac-lucky/pushward-integrations/shared/testutil"
 	"github.com/mac-lucky/pushward-integrations/shared/text"
 )
@@ -262,11 +266,9 @@ func TestRetractOncePerPayload(t *testing.T) {
 	}
 }
 
-// The sweep and End from the Activities page are off the webhook's budget, so
-// their retracts run inline: done when the call returns, one at a time, and
-// once per collapse id. Acknowledge is off, so no cancel call gives a
-// detached retract time to finish.
-func TestRetractInlineOffTheWebhook(t *testing.T) {
+// The sweep and End from the Activities page queue their retracts, once per
+// collapse id. Acknowledge is off, so no cancel call comes in between.
+func TestRetractQueuedOncePerCollapseID(t *testing.T) {
 	cfg := retractConfig()
 	cfg.Ack = false
 	t.Run("stale sweep", func(t *testing.T) {
@@ -280,8 +282,11 @@ func TestRetractInlineOffTheWebhook(t *testing.T) {
 
 		b.sweepStale(context.Background(), time.Minute)
 
-		if r, _ := m.requests(t, http.MethodPost, "/notifications/retract"); len(r) != 2 {
-			t.Errorf("got %d retracts when the sweep returned, want 2 (one per collapse id)", len(r))
+		if n := len(b.retracts); n != 2 {
+			t.Errorf("%d retracts queued when the sweep returned, want 2 (one per collapse id)", n)
+		}
+		if r, _ := m.retracts(t, b); len(r) != 2 {
+			t.Errorf("got %d retracts, want 2", len(r))
 		}
 	})
 	t.Run("End from the Activities page", func(t *testing.T) {
@@ -291,8 +296,8 @@ func TestRetractInlineOffTheWebhook(t *testing.T) {
 
 		b.Forget(context.Background(), makeSlug("HighCPU"))
 
-		if r, _ := m.requests(t, http.MethodPost, "/notifications/retract"); len(r) != 1 {
-			t.Errorf("got %d retracts when Forget returned, want 1", len(r))
+		if r, _ := m.retracts(t, b); len(r) != 1 {
+			t.Errorf("got %d retracts, want 1", len(r))
 		}
 	})
 }
@@ -379,5 +384,307 @@ func TestRetractWhenResolveOvertakesFiringPush(t *testing.T) {
 	}
 	if cancels, _ := m.requests(t, http.MethodPost, "/notifications/receipts/cancel"); len(cancels) != 0 {
 		t.Errorf("got %d cancel requests with acknowledge off, want none", len(cancels))
+	}
+}
+
+// Grafana sends the resolved webhook at the group's next flush, minutes after
+// the alertmanager backstop, the stale sweep or End from the Activities page
+// ended the alert. That late resolve finds the alert untracked and must leave
+// the devices as the end left them.
+func TestLateResolveAfterTheAlertEnded(t *testing.T) {
+	cases := []struct {
+		name         string
+		end          func(t *testing.T, b *Bridge)
+		wantRetracts int
+		wantResolved bool
+	}{
+		{"backstop, Live Activity not ended: the resolved push stays", func(t *testing.T, b *Bridge) {
+			b.active["HighCPU"] = trackedHighCPU("fp1") // no activity on the mock, ENDED fails
+			b.checkAlertStates(context.Background())
+		}, 0, true},
+		{"backstop, Live Activity ended: one retract", func(t *testing.T, b *Bridge) {
+			trackHighCPU(t, b, "fp1")
+			b.checkAlertStates(context.Background())
+		}, 1, false},
+		{"stale sweep: one retract", func(t *testing.T, b *Bridge) {
+			st := trackedHighCPU("fp1")
+			st.lastSeen = time.Now().Add(-time.Hour)
+			b.active["HighCPU"] = st
+			b.sweepStale(context.Background(), time.Minute)
+		}, 1, false},
+		{"End from the Activities page: one retract", func(t *testing.T, b *Bridge) {
+			b.active["HighCPU"] = trackedHighCPU("fp1")
+			b.Forget(context.Background(), makeSlug("HighCPU"))
+		}, 1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newMockServer(t, testutil.MockOptions{})
+			b := newTestBridge(t, m.url, resolvingResolver{}, retractConfig())
+			slug := makeSlug("HighCPU")
+			b.sendAlertNotification(context.Background(), slog.Default(), firingAlert(), slug, slug, "HighCPU", false, b.ackEnabled())
+			tc.end(t, b)
+			m.retracts(t, b)
+
+			raw, err := json.Marshal(webhookPayload{Alerts: []alert{resolvedAlert()}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := b.ProcessWebhook(context.Background(), raw); err != nil {
+				t.Fatal(err)
+			}
+			b.wg.Wait()
+
+			if r, _ := m.retracts(t, b); len(r) != tc.wantRetracts {
+				t.Errorf("got %d retracts, want %d", len(r), tc.wantRetracts)
+			}
+			notifs, _ := m.requests(t, http.MethodPost, "/notifications")
+			last, _ := notifs[len(notifs)-1]["body"].(string)
+			if got := strings.HasPrefix(last, "Resolved"); got != tc.wantResolved {
+				t.Errorf("last push = %q, want the resolved push: %v", last, tc.wantResolved)
+			}
+		})
+	}
+}
+
+// The alert fires again after the backstop ended it: its next resolve takes
+// the new push back.
+func TestFiringPushAfterAnEndIsRetracted(t *testing.T) {
+	m := newMockServer(t, testutil.MockOptions{})
+	cfg := retractConfig()
+	cfg.ActivityMode = ActivityModeLabeled // no Live Activity, push only
+	b := newTestBridge(t, m.url, resolvingResolver{}, cfg)
+	st := trackedHighCPU("fp1")
+	st.notifyOnly = true
+	b.active["HighCPU"] = st
+	b.checkAlertStates(context.Background())
+
+	b.handleFiring(context.Background(), firingAlert(), nil)
+	b.handleResolved(context.Background(), resolvedAlert(), nil)
+
+	if r, _ := m.retracts(t, b); len(r) != 2 {
+		t.Errorf("got %d retracts, want 2: one per end", len(r))
+	}
+}
+
+// One payload retracts a collapse id once, and sends nothing under it after:
+// the retract lands late and would take that push too.
+func TestRetractOnceAndNothingAfterInAPayload(t *testing.T) {
+	anon := func(fp string) alert {
+		return alert{Status: alertStatusResolved, Fingerprint: fp, Labels: map[string]string{}}
+	}
+	trackAnon := func(b *Bridge, fp string) {
+		b.active[fp] = &alertState{slug: makeSlug(fp), notifyOnly: true, fingerprints: map[string]struct{}{fp: {}}, lastSeen: time.Now()}
+	}
+	second := resolvedAlert()
+	second.Fingerprint = "fp2"
+	cases := []struct {
+		name   string
+		track  func(b *Bridge)
+		alerts []alert
+	}{
+		{"three tracked alerts without a name", func(b *Bridge) {
+			trackAnon(b, "fpA")
+			trackAnon(b, "fpB")
+			trackAnon(b, "fpC")
+		}, []alert{anon("fpA"), anon("fpB"), anon("fpC")}},
+		{"last instance, then an untracked one of the same alert", func(b *Bridge) {
+			b.active["HighCPU"] = trackedHighCPU("fp1")
+			b.active["HighCPU"].notifyOnly = true
+		}, []alert{resolvedAlert(), second}},
+		{"untracked alert without a name, then a tracked one", func(b *Bridge) {
+			trackAnon(b, "fpB")
+		}, []alert{anon("fpA"), anon("fpB")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newMockServer(t, testutil.MockOptions{})
+			b := newTestBridge(t, m.url, nil, retractConfig())
+			tc.track(b)
+			raw, err := json.Marshal(webhookPayload{Alerts: tc.alerts})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := b.ProcessWebhook(context.Background(), raw); err != nil {
+				t.Fatal(err)
+			}
+			b.wg.Wait()
+
+			if r, _ := m.retracts(t, b); len(r) != 1 {
+				t.Errorf("got %d retracts, want 1", len(r))
+			}
+			if notifs, _ := m.requests(t, http.MethodPost, "/notifications"); len(notifs) != 0 {
+				t.Errorf("got %d pushes, want none under a retracted id", len(notifs))
+			}
+		})
+	}
+}
+
+// newQueueBridge is a bridge from NewBridge, so its retract queue runs. No
+// sweeper (StaleTimeout 0) and no backstop (no resolver) run beside it.
+func newQueueBridge(t *testing.T, url string, cfg Config) *Bridge {
+	t.Helper()
+	pw := pushward.NewClient(url, "hlk_x")
+	rc := pushward.NewClient(url, "hlk_x", pushward.WithRetryBudget(time.Nanosecond))
+	b := NewBridge(pw, rc, nopQuerier{}, nil, NewPoller(nopQuerier{}, pw, time.Hour), nil, nil, cfg)
+	t.Cleanup(b.Stop)
+	return b
+}
+
+// throttledRetracts serves retracts the way the account's rate limit does past
+// its burst: after the first burst, every other attempt is a 429 with a short
+// retry_after_ms. accepted counts the retracts that went through.
+func throttledRetracts(t *testing.T, burst int) (url string, accepted func() int) {
+	t.Helper()
+	var mu sync.Mutex
+	var calls, ok int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/notifications/retract" {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		calls++
+		pass := calls <= burst || (calls-burst)%2 == 0
+		if pass {
+			ok++
+		}
+		mu.Unlock()
+		if !pass {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"status":429,"code":"rate_limit.exceeded","retry_after_ms":5}`))
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"devices":1}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return ok
+	}
+}
+
+// Ends without a resolved push to fall back on can take more pushes back
+// than the burst of 5: the queue waits out each 429 and gets them all down.
+func TestQueuedRetractsWaitOutTheRateLimit(t *testing.T) {
+	const n = 8
+	names := make([]string, n)
+	for i := range names {
+		names[i] = fmt.Sprintf("Alert%d", i)
+	}
+	cases := []struct {
+		name string
+		end  func(t *testing.T, b *Bridge)
+	}{
+		{"stale sweep", func(t *testing.T, b *Bridge) {
+			old := time.Now().Add(-time.Hour)
+			b.mu.Lock()
+			for _, name := range names {
+				b.active[name] = &alertState{slug: makeSlug(name), alertname: name, lastSeen: old}
+			}
+			b.mu.Unlock()
+			b.sweepStale(context.Background(), time.Minute)
+		}},
+		{"untracked resolves after a restart", func(t *testing.T, b *Bridge) {
+			var alerts []alert
+			for i, name := range names {
+				alerts = append(alerts, alert{Status: alertStatusResolved, Fingerprint: fmt.Sprint("fp", i), Labels: map[string]string{"alertname": name}})
+			}
+			raw, err := json.Marshal(webhookPayload{Alerts: alerts})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := b.ProcessWebhook(context.Background(), raw); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			url, accepted := throttledRetracts(t, 5)
+			cfg := retractConfig()
+			cfg.Ack = false // no cancel calls; the server only takes retracts
+			b := newQueueBridge(t, url, cfg)
+
+			tc.end(t, b)
+
+			deadline := time.Now().Add(5 * time.Second)
+			for accepted() < n && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if got := accepted(); got != n {
+				t.Errorf("%d of %d retracts went through, want all", got, n)
+			}
+		})
+	}
+}
+
+// Stop does not sit out a Retry-After: the retract waiting on it is given up.
+func TestStopDoesNotWaitOutTheRateLimit(t *testing.T) {
+	asked := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case asked <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Retry-After", "60")
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"status":429,"code":"rate_limit.exceeded"}`))
+	}))
+	t.Cleanup(srv.Close)
+	b := newQueueBridge(t, srv.URL, retractConfig())
+
+	b.queueRetract(slog.Default(), "HighCPU", makeSlug("HighCPU"))
+	select {
+	case <-asked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the queued retract was never made")
+	}
+	start := time.Now()
+	b.Stop()
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("Stop took %s, want it to give up the throttled retract", d)
+	}
+}
+
+func TestRetractQueueFull(t *testing.T) {
+	b := newTestBridge(t, "http://127.0.0.1:0", nil, retractConfig())
+	dl := &recLog{}
+	b.deliveryLog = dl
+	for range retractQueueCap + 1 {
+		b.queueRetract(slog.Default(), "HighCPU", makeSlug("HighCPU"))
+	}
+	if n := len(b.retracts); n != retractQueueCap {
+		t.Errorf("%d retracts queued, want %d", n, retractQueueCap)
+	}
+	if e := dl.find("retract"); e == nil || e.ok {
+		t.Errorf("delivery log retract = %+v, want the dropped one logged as failed", e)
+	}
+}
+
+// The memory of ended ids is capped; the oldest is forgotten first.
+func TestEndedIsBounded(t *testing.T) {
+	b := newTestBridge(t, "http://127.0.0.1:0", nil, retractConfig())
+	base := time.Now().Add(-time.Hour)
+	for i := range activeAlertCap {
+		b.ended[fmt.Sprint(i)] = base.Add(time.Duration(i) * time.Second)
+	}
+
+	if !b.endedOnce("new") {
+		t.Fatal("endedOnce(new) = false, want true")
+	}
+	if b.endedOnce("new") {
+		t.Error("endedOnce(new) again = true, want false")
+	}
+	if len(b.ended) != activeAlertCap {
+		t.Errorf("len(ended) = %d, want %d", len(b.ended), activeAlertCap)
+	}
+	if _, ok := b.ended["0"]; ok {
+		t.Error("the oldest id survived")
 	}
 }

@@ -77,10 +77,17 @@ const (
 	// resolve, so a slow cancel never holds up the resolved push behind it.
 	ackCancelTimeout = 5 * time.Second
 
-	// retractTimeout bounds taking an alert's push back. The retract client
-	// does not retry, so a throttled retract fails at once and a resolve sends
-	// the resolved push instead of waiting out the rate limit.
+	// retractTimeout bounds taking an alert's push back on a resolve. The
+	// retract client does not retry, so a throttled retract fails at once and
+	// the resolve sends the resolved push instead of waiting out the rate limit.
 	retractTimeout = 5 * time.Second
+
+	// The ends without a resolved push to fall back on queue their retracts
+	// (queueRetract): one at a time, waiting out the rate limit, each given up
+	// retractWait after it was queued. The account gets 10 a minute after a
+	// burst of 5, so the queue holds more than can go out in that time.
+	retractWait     = 2 * time.Minute
+	retractQueueCap = 32
 
 	// What a push says in place of the alert when it cannot be encrypted.
 	contentFreeFiring   = "Grafana alert firing"
@@ -194,13 +201,20 @@ type Bridge struct {
 	metrics       Metrics        // nil if metric counting disabled
 	cfg           Config
 
-	mu       sync.Mutex
-	active   map[string]*alertState
-	wg       sync.WaitGroup // tracks in-flight async webhook processing
-	bgWg     sync.WaitGroup // tracks sweeper/checker background goroutines
+	mu     sync.Mutex
+	active map[string]*alertState
+	// ended holds, with when, the collapse ids whose alert pushes this
+	// instance ended with RetractOnResolve on and has sent no firing push
+	// under since, so a later resolve under one (a late webhook, or another
+	// alert without a name) neither retracts again nor sends. At most
+	// activeAlertCap; the oldest goes first.
+	ended    map[string]time.Time
+	retracts chan retractJob // see queueRetract
+	wg       sync.WaitGroup  // tracks in-flight async webhook processing
+	bgWg     sync.WaitGroup  // tracks sweeper/checker/retract-queue goroutines
 	capDrops *syncx.DropCounter
 
-	stop     context.CancelFunc // cancels the sweeper/checker background context
+	stop     context.CancelFunc // cancels the sweeper/checker/retract-queue context
 	stopOnce sync.Once
 }
 
@@ -252,8 +266,15 @@ type repeatSample struct {
 	at     time.Time
 }
 
-// NewBridge constructs the bridge and starts its background sweeper and
-// alertmanager backstop. Call Stop to tear them down. p is the per-alert poller
+// retractJob is a queued retract of an alert's push (see queueRetract).
+type retractJob struct {
+	logger         *slog.Logger
+	alertname, tag string
+	deadline       time.Time
+}
+
+// NewBridge constructs the bridge and starts its background sweeper,
+// alertmanager backstop and retract queue. Call Stop to tear them down. p is the per-alert poller
 // (constructed by the caller with the same metrics querier); gr may be nil to
 // disable PromQL auto-extract and the alertmanager backstop; dl and m may be nil.
 // rc makes the retracts and should not retry (see retractTimeout).
@@ -283,6 +304,8 @@ func NewBridge(
 		metrics:       m,
 		cfg:           cfg,
 		active:        make(map[string]*alertState),
+		ended:         make(map[string]time.Time),
+		retracts:      make(chan retractJob, retractQueueCap),
 		capDrops:      syncx.NewDropCounter(100),
 	}
 	if p != nil {
@@ -293,12 +316,14 @@ func NewBridge(
 	b.stop = cancel
 	b.startSweeper(ctx, cfg.StaleTimeout)
 	b.startAlertChecker(ctx, alertCheckInterval)
+	b.startRetracts(ctx)
 	return b
 }
 
-// Stop cancels the background sweeper/checker, stops all pollers, and waits for
-// in-flight webhook processing and background goroutines to finish. Safe to call
-// multiple times.
+// Stop cancels the background sweeper/checker and the retract queue (a retract
+// in flight is abandoned, the queued ones are dropped), stops all pollers, and
+// waits for in-flight webhook processing and background goroutines to finish.
+// Safe to call multiple times.
 func (b *Bridge) Stop() {
 	b.stopOnce.Do(func() {
 		if b.stop != nil {
@@ -692,10 +717,15 @@ func (b *Bridge) cancelAckIfGone(ctx context.Context, logger *slog.Logger, mapKe
 	}
 	b.mu.Lock()
 	_, tracked := b.active[mapKey]
+	if !tracked && retract {
+		b.endedOnce(alertCollapseID(alertname))
+	}
 	b.mu.Unlock()
 	if !tracked {
 		b.cancelAck(ctx, logger, alertname, slug, ack)
-		b.retractDetached(ctx, logger, alertname, slug, retract)
+		if retract {
+			b.queueRetract(logger, alertname, slug)
+		}
 	}
 }
 
@@ -779,8 +809,9 @@ func (b *Bridge) repeatValues(mapKey string) map[string]float64 {
 }
 
 // handleResolved processes one resolved alert. noRetract holds the collapse
-// ids its payload must not retract (see ProcessWebhook); an untracked resolve
-// adds the one it retracts, so a payload retracts each id once.
+// ids its payload must not retract (see ProcessWebhook). A resolve under an
+// id this instance ended already (Bridge.ended) retracts and sends nothing
+// under it, so a payload retracts each id once.
 func (b *Bridge) handleResolved(ctx context.Context, a alert, noRetract map[string]bool) {
 	if a.Fingerprint == "" {
 		slog.Warn("alert has empty fingerprint, skipping")
@@ -795,27 +826,27 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert, noRetract map[stri
 	slug := makeSlug(mapKey)
 	logger := slog.With("alertname", alertname, "slug", slug, "fingerprint", a.Fingerprint)
 
+	id := alertCollapseID(alertname)
 	b.mu.Lock()
 	state, exists := b.active[mapKey]
 	if !exists {
-		b.mu.Unlock()
 		// Not tracked, typically because a settings save recreated the
-		// plugin while the alert was firing. The tag is derived from the
-		// alert, so the repeats of its push can still be stopped. Without
-		// the instance list there is no telling whether this was the last
-		// instance: with a contact point grouped per instance, one instance
-		// resolving after a settings save also stops the repeats of those
-		// still firing, and a retract takes their push back too. Accepted;
-		// the next firing webhook notifies again. The labels tell which kind
-		// of push it was, if one was sent.
+		// plugin while the alert was firing, or because the backstop, the
+		// sweep or End got there first (then ended says so). The tag is
+		// derived from the alert, so the repeats of its push can still be
+		// stopped. Without the instance list there is no telling whether
+		// this was the last instance: with a contact point grouped per
+		// instance, one instance resolving after a settings save also stops
+		// the repeats of those still firing, and a retract takes their push
+		// back too. Accepted; the next firing webhook notifies again. The
+		// labels tell which kind of push it was, if one was sent.
 		notifyOnly := !b.wantsActivity(a)
+		retract := b.retractFor(notifyOnly) && !noRetract[id] && b.endedOnce(id)
+		b.mu.Unlock()
 		b.cancelAck(ctx, logger, alertname, slug, b.ackFor(notifyOnly))
-		id := alertCollapseID(alertname)
-		retract := b.retractFor(notifyOnly) && !noRetract[id]
 		if retract {
-			noRetract[id] = true
+			b.queueRetract(logger, alertname, slug)
 		}
-		b.retractDetached(ctx, logger, alertname, slug, retract)
 		return
 	}
 
@@ -837,11 +868,19 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert, noRetract map[stri
 	primary := state.primary
 	notifyOnly := state.notifyOnly
 	delete(b.active, mapKey)
+	retract := !noRetract[id]
+	// Another alert under the id (one without a name) was ended already, and
+	// what this one showed under it went with that.
+	quiet := retract && b.retractFor(notifyOnly) && !b.endedOnce(id)
 	b.mu.Unlock()
-	retract := !noRetract[alertCollapseID(alertname)]
+	if quiet {
+		b.cancelAck(ctx, logger, alertname, slug, b.ackFor(notifyOnly))
+	}
 
 	if notifyOnly {
-		b.sendResolved(ctx, logger, a, "", slug, alertname, true, retract)
+		if !quiet {
+			b.sendResolved(ctx, logger, a, "", slug, alertname, true, retract)
+		}
 		return
 	}
 
@@ -890,7 +929,7 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert, noRetract map[stri
 	// Drop the deep link in that case, though: the likeliest reason the end
 	// update failed is that the activity is gone server-side, and a slug that
 	// does not resolve is a 422 that loses the whole notification.
-	if b.cfg.AlsoNotify {
+	if b.cfg.AlsoNotify && !quiet {
 		linkSlug := slug
 		if !ended {
 			linkSlug = ""
@@ -1173,8 +1212,13 @@ func alertCollapseID(alertname string) string {
 // notifyOnly says whether the alert has no Live Activity.
 func (b *Bridge) sendResolved(ctx context.Context, logger *slog.Logger, a alert, slug, tag, alertname string, notifyOnly, retract bool) {
 	b.cancelAck(ctx, logger, alertname, tag, b.ackFor(notifyOnly))
-	if retract && b.cfg.RetractOnResolve && b.retractAlert(ctx, logger, alertname, tag) {
-		return
+	if retract && b.cfg.RetractOnResolve {
+		rctx, cancel := context.WithTimeout(ctx, retractTimeout)
+		retracted := b.retractAlert(rctx, b.retractClient, logger, alertname, tag)
+		cancel()
+		if retracted {
+			return
+		}
 	}
 	b.sendAlertNotification(ctx, logger, a, slug, tag, alertname, true, false)
 }
@@ -1190,6 +1234,11 @@ func (b *Bridge) sendAlertNotification(ctx context.Context, logger *slog.Logger,
 	if !resolved && ack {
 		req.Acknowledge = &pushward.NotificationAcknowledge{RepeatSeconds: b.cfg.AckRepeat, ExpireSeconds: b.cfg.AckExpire}
 		req.Tags = []string{tag}
+	}
+	if !resolved {
+		b.mu.Lock()
+		delete(b.ended, req.CollapseID) // a firing push is up under it again
+		b.mu.Unlock()
 	}
 
 	// textNote says what happened to the alert text, for the delivery log.
@@ -1334,12 +1383,10 @@ func (b *Bridge) cancelAck(ctx context.Context, logger *slog.Logger, alertname, 
 }
 
 // retractAlert takes back the pushes shown under the alert's collapse id on
-// every device of the account and reports whether the retract went to any
-// device. Bounded by retractTimeout; a failure is only logged.
-func (b *Bridge) retractAlert(ctx context.Context, logger *slog.Logger, alertname, tag string) bool {
-	ctx, cancel := context.WithTimeout(ctx, retractTimeout)
-	defer cancel()
-	n, err := b.retractClient.RetractNotifications(ctx, alertCollapseID(alertname))
+// every device of the account with c and reports whether the retract went to
+// any device. Bounded by ctx; a failure is only logged.
+func (b *Bridge) retractAlert(ctx context.Context, c *pushward.Client, logger *slog.Logger, alertname, tag string) bool {
+	n, err := c.RetractNotifications(ctx, alertCollapseID(alertname))
 	if err != nil {
 		logger.Warn("failed to retract the alert push", "error", err)
 		b.record(alertname, tag, "retract", false, err.Error())
@@ -1349,21 +1396,67 @@ func (b *Bridge) retractAlert(ctx context.Context, logger *slog.Logger, alertnam
 	return n > 0
 }
 
-// retractDetached runs retractAlert on its own goroutine, cut loose from
-// ctx's deadline, for the webhook paths that end an alert without a resolved
-// push: nothing waits on the result, so it must not spend the webhook's
-// budget. retract false makes no call. Stop waits for it, which is safe only
-// from a webhook goroutine: Stop drains those before it waits on bgWg.
-func (b *Bridge) retractDetached(ctx context.Context, logger *slog.Logger, alertname, tag string, retract bool) {
-	if !retract {
-		return
+// queueRetract hands the retract of an alert's push to the retract queue,
+// for the paths that end an alert without a resolved push to fall back on
+// (untracked resolve, sweep, End, a resolve that overtook the firing push).
+// They never wait on it, and its throttled retracts are tried again instead
+// of lost. A full queue drops the retract, logged.
+func (b *Bridge) queueRetract(logger *slog.Logger, alertname, tag string) {
+	select {
+	case b.retracts <- retractJob{logger: logger, alertname: alertname, tag: tag, deadline: time.Now().Add(retractWait)}:
+	default:
+		logger.Warn("retract queue full, the alert push stays up", "cap", retractQueueCap)
+		b.record(alertname, tag, "retract", false, "retract queue full")
 	}
-	ctx = context.WithoutCancel(ctx)
+}
+
+// startRetracts runs the queued retracts one at a time until ctx ends. Each
+// goes through pwClient, which waits out a 429's Retry-After, so the queue
+// paces itself to the account's rate limit instead of losing every retract
+// past the burst.
+func (b *Bridge) startRetracts(ctx context.Context) {
 	b.bgWg.Add(1)
 	go func() {
 		defer b.bgWg.Done()
-		b.retractAlert(ctx, logger, alertname, tag)
+		for {
+			select {
+			case <-ctx.Done():
+				if n := len(b.retracts); n > 0 {
+					slog.Warn("stopping with retracts still queued, their alert pushes stay up", "count", n)
+				}
+				return
+			case j := <-b.retracts:
+				b.runRetract(ctx, j)
+			}
+		}
 	}()
+}
+
+// runRetract makes the queued retract j, given up at its deadline.
+func (b *Bridge) runRetract(ctx context.Context, j retractJob) {
+	ctx, cancel := context.WithDeadline(ctx, j.deadline)
+	defer cancel()
+	b.retractAlert(ctx, b.pwClient, j.logger, j.alertname, j.tag)
+}
+
+// endedOnce records that this instance ended the alert pushes under
+// collapse id and reports whether that is news: false when it had ended them
+// already with no firing push under id since. The caller holds b.mu.
+func (b *Bridge) endedOnce(id string) bool {
+	if _, ok := b.ended[id]; ok {
+		return false
+	}
+	if len(b.ended) >= activeAlertCap {
+		var oldest string
+		for k, at := range b.ended {
+			if oldest == "" || at.Before(b.ended[oldest]) {
+				oldest = k
+			}
+		}
+		delete(b.ended, oldest)
+	}
+	b.ended[id] = time.Now()
+	return true
 }
 
 // SealNotification moves req's title, subtitle and body into an end-to-end
@@ -1448,8 +1541,11 @@ func (b *Bridge) Forget(ctx context.Context, slug string) bool {
 			break
 		}
 	}
+	// Only a tracked alert says which push to take back.
+	var retract bool
 	if key != "" {
 		delete(b.active, key)
+		retract = b.retractFor(false) && b.endedOnce(alertCollapseID(alertname))
 	}
 	b.mu.Unlock()
 	if b.poller != nil {
@@ -1460,9 +1556,8 @@ func (b *Bridge) Forget(ctx context.Context, slug string) bool {
 	}
 	logger := slog.With("slug", slug)
 	b.cancelAck(ctx, logger, alertname, slug, b.ackEnabled())
-	// Only a tracked alert says which push to take back.
-	if key != "" && b.retractFor(false) {
-		b.retractAlert(ctx, logger, alertname, slug)
+	if retract {
+		b.queueRetract(logger, alertname, slug)
 	}
 	return key != ""
 }
@@ -1520,7 +1615,7 @@ func (b *Bridge) startSweeper(ctx context.Context, maxAge time.Duration) {
 
 func (b *Bridge) sweepStale(ctx context.Context, maxAge time.Duration) {
 	now := time.Now()
-	var swept []alertState
+	var swept, retract []alertState
 	b.mu.Lock()
 	for name, state := range b.active {
 		if now.Sub(state.lastSeen) > maxAge {
@@ -1528,20 +1623,19 @@ func (b *Bridge) sweepStale(ctx context.Context, maxAge time.Duration) {
 			b.poller.Stop(state.slug)
 			delete(b.active, name)
 			swept = append(swept, *state)
+			// Once per collapse id: the account shares a small retract budget.
+			if b.retractFor(state.notifyOnly) && b.endedOnce(alertCollapseID(state.alertname)) {
+				retract = append(retract, *state)
+			}
 		}
 	}
 	b.mu.Unlock()
-	// Outside b.mu: each cancel and retract is a network call. The retracts
-	// go one at a time and once per collapse id: the account shares a small
-	// retract budget.
-	retracted := make(map[string]bool)
+	// Outside b.mu: each cancel is a network call.
 	for _, st := range swept {
-		logger := slog.With("alertname", st.alertname, "slug", st.slug)
-		b.cancelAck(ctx, logger, st.alertname, st.slug, b.ackFor(st.notifyOnly))
-		if id := alertCollapseID(st.alertname); b.retractFor(st.notifyOnly) && !retracted[id] {
-			retracted[id] = true
-			b.retractAlert(ctx, logger, st.alertname, st.slug)
-		}
+		b.cancelAck(ctx, slog.With("alertname", st.alertname, "slug", st.slug), st.alertname, st.slug, b.ackFor(st.notifyOnly))
+	}
+	for _, st := range retract {
+		b.queueRetract(slog.With("alertname", st.alertname, "slug", st.slug), st.alertname, st.slug)
 	}
 }
 
@@ -1605,6 +1699,9 @@ func (b *Bridge) checkAlertStates(ctx context.Context) {
 		// bumps lastSeen, and we must not tear down that fresh activity/poller.
 		if stillActive && cur.lastSeen.Equal(e.state.lastSeen) {
 			delete(b.active, e.name)
+			if b.retractFor(cur.notifyOnly) {
+				b.endedOnce(alertCollapseID(cur.alertname))
+			}
 		} else {
 			stillActive = false
 		}

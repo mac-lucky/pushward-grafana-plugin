@@ -92,6 +92,8 @@ func newTestBridge(t *testing.T, url string, resolver GrafanaResolver, cfg Confi
 		poller:        poller,
 		grafanaClient: resolver,
 		active:        make(map[string]*alertState),
+		ended:         make(map[string]time.Time),
+		retracts:      make(chan retractJob, retractQueueCap),
 		capDrops:      syncx.NewDropCounter(100),
 		cfg:           cfg,
 	}
@@ -515,10 +517,13 @@ func (m mockServer) rawNotifications(t *testing.T) []string {
 	return out
 }
 
-// retracts returns the recorded retracts once the detached ones are done.
+// retracts makes the queued retracts, as the queue would, then returns the
+// recorded ones.
 func (m mockServer) retracts(t *testing.T, b *Bridge) (bodies []map[string]any, idx []int) {
 	t.Helper()
-	b.bgWg.Wait()
+	for len(b.retracts) > 0 {
+		b.runRetract(context.Background(), <-b.retracts)
+	}
 	return m.requests(t, http.MethodPost, "/notifications/retract")
 }
 
