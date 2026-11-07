@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.15.2
+
+- Retract on resolve: a resolve that overtakes its own firing push now still retracts it, or sends the Resolved push, when the retract queue is full or a queued retract fails. Before, it sent nothing and the firing notification stayed up.
+
 ## 0.15.1
 
 - Retract on resolve: an alert that ends without a resolved push to fall back on (the stale sweep, ending it from the Activities page, a resolve after a settings save restarted the plugin) now has its retract queued and sent at the pace PushWard's rate limit allows, instead of losing every retract past the first few. A queued retract is given up after 2 minutes, and one dropped when the plugin stops is written to the delivery log.
