@@ -1077,6 +1077,82 @@ func TestResolveSparesAnAlertThatFiresAgainMeanwhile(t *testing.T) {
 	}
 }
 
+// The ended mark of a resolve can go while it runs without the alert firing
+// again: the overtaken firing push queued a retract under it that found the
+// queue full or failed fast. The resolve still ends the push then; only an
+// alert tracked again under the collapse id makes it stand down.
+func TestResolveGoesOnWhenItsEndedMarkIsDropped(t *testing.T) {
+	cases := []struct {
+		name string
+		// drop is the path whose handler drops the mark, before it answers.
+		drop         string
+		refire       bool
+		wantResolved int
+	}{
+		{"before the retract", "/notifications/receipts/cancel", false, 1},
+		{"after a retract that reached no device", "/notifications/retract", false, 1},
+		{"after a retract that reached no device, fired again", "/notifications/retract", true, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var b *Bridge
+			var mu sync.Mutex
+			var retracts, resolved int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == tc.drop {
+					b.mu.Lock()
+					delete(b.ended, alertCollapseID("HighCPU"))
+					if tc.refire {
+						st := trackedHighCPU("fp2")
+						st.notifyOnly = true
+						b.active["HighCPU"] = st
+					}
+					b.mu.Unlock()
+				}
+				switch r.URL.Path {
+				case "/notifications/receipts/cancel":
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{"canceled":1}`))
+				case "/notifications/retract":
+					mu.Lock()
+					retracts++
+					mu.Unlock()
+					w.WriteHeader(http.StatusAccepted)
+					_, _ = w.Write([]byte(`{"devices":0}`))
+				case "/notifications":
+					var body map[string]any
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					if msg, _ := body["body"].(string); strings.HasPrefix(msg, "Resolved") {
+						mu.Lock()
+						resolved++
+						mu.Unlock()
+					}
+					w.WriteHeader(http.StatusAccepted)
+					_, _ = w.Write([]byte(`{}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			b = newTestBridge(t, srv.URL, nil, retractConfig())
+			st := trackedHighCPU("fp1")
+			st.notifyOnly = true
+			b.active["HighCPU"] = st
+
+			b.handleResolved(context.Background(), resolvedAlert(), nil)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if retracts != 1 {
+				t.Errorf("got %d retracts, want 1", retracts)
+			}
+			if resolved != tc.wantResolved {
+				t.Errorf("got %d resolved pushes, want %d", resolved, tc.wantResolved)
+			}
+		})
+	}
+}
+
 // A firing alert that sends no push (a Live Activity with also notify off)
 // leaves a queued retract of its collapse id alone: nothing replaces the old
 // push, so it still has to come down.

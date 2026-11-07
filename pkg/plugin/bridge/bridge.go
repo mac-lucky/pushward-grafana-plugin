@@ -1237,8 +1237,9 @@ func alertCollapseID(alertname string) string {
 // With retract the caller marked the id ended. A firing alert taken under it
 // since, in another webhook, cleared the mark (firedAgain), and its push
 // replaces the old one: then neither the retract nor the resolved push goes
-// out. A queued retract of an earlier end of the id that fails meanwhile
-// clears the mark too, and the backstop's end then sends nothing either.
+// out. A queued retract under the id that finds the queue full or fails
+// clears the mark too; with no alert tracked again under the id that is no
+// re-fire, and the retract or resolved push still goes out.
 func (b *Bridge) sendResolved(ctx context.Context, logger *slog.Logger, a alert, slug, tag, alertname string, notifyOnly, retract bool) {
 	b.cancelAck(ctx, logger, alertname, tag, b.ackFor(notifyOnly))
 	if retract && b.cfg.RetractOnResolve {
@@ -1547,12 +1548,23 @@ func (b *Bridge) firedAgain(id string) {
 }
 
 // stillEnded reports whether the alert pushes under alertname's collapse id
-// are still marked ended.
+// are still ended: marked so, or the mark is gone with no alert tracked again
+// to push under the id. A full retract queue or a failed queued retract drops
+// the mark too, and that is no re-fire.
 func (b *Bridge) stillEnded(alertname string) bool {
+	id := alertCollapseID(alertname)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	_, ok := b.ended[alertCollapseID(alertname)]
-	return ok
+	if _, ok := b.ended[id]; ok {
+		return true
+	}
+	for _, s := range b.active {
+		// handleFiring's guard on firedAgain.
+		if (s.notifyOnly || b.cfg.AlsoNotify) && alertCollapseID(s.alertname) == id {
+			return false
+		}
+	}
+	return true
 }
 
 // endedOnce records that this instance ended the alert pushes under
