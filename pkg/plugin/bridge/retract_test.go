@@ -64,8 +64,9 @@ func TestRetractOnEveryEnd(t *testing.T) {
 			b.handleResolved(context.Background(), resolvedAlert(), nil)
 		}},
 		{"alertmanager backstop", func(t *testing.T, b *Bridge) {
-			trackHighCPU(t, b)
-			b.endAlertActivity(context.Background(), "HighCPU", trackedHighCPU())
+			b.grafanaClient = resolvingResolver{}
+			trackHighCPU(t, b, "fp1")
+			b.checkAlertStates(context.Background())
 		}},
 		{"alertmanager backstop, alert without a Live Activity, also notify off", func(t *testing.T, b *Bridge) {
 			b.cfg.AlsoNotify = false
@@ -992,5 +993,139 @@ func TestRetractsDroppedAtStopAreRecorded(t *testing.T) {
 	}
 	if n := len(b.retracts); n != 0 {
 		t.Errorf("%d retracts left in the queue after Stop, want none", n)
+	}
+}
+
+// A resolve still stopping the acknowledge repeats while the alert fires
+// again in another webhook: the new firing push replaces the old one, so the
+// resolve neither retracts nor sends its resolved push after it.
+func TestResolveSparesAnAlertThatFiresAgainMeanwhile(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	inCancel, release, pushed := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var cancelOnce, pushOnce, releaseOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/notifications/receipts/cancel":
+			first := false
+			cancelOnce.Do(func() { first = true; close(inCancel) })
+			if first {
+				<-release
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"canceled":1}`))
+		case "/notifications":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			msg, _ := body["body"].(string)
+			mu.Lock()
+			seen = append(seen, "push "+msg)
+			mu.Unlock()
+			pushOnce.Do(func() { close(pushed) })
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{}`))
+		case "/notifications/retract":
+			mu.Lock()
+			seen = append(seen, "retract")
+			mu.Unlock()
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"devices":1}`))
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	b := newQueueBridge(t, srv.URL, retractConfig())
+
+	b.mu.Lock()
+	st := trackedHighCPU("fp1")
+	st.notifyOnly = true
+	b.active["HighCPU"] = st
+	b.mu.Unlock()
+
+	res := resolvedAlert()
+	res.Labels[LabelActivity] = "false"
+	raw, _ := json.Marshal(webhookPayload{Alerts: []alert{res}})
+	if err := b.ProcessWebhook(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	<-inCancel
+
+	fire := firingAlert()
+	fire.Fingerprint = "fp2"
+	fire.Labels[LabelActivity] = "false"
+	fire.Annotations["summary"] = "fired again"
+	raw, _ = json.Marshal(webhookPayload{Alerts: []alert{fire}})
+	if err := b.ProcessWebhook(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-pushed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the alert firing again sent no push")
+	}
+	releaseOnce.Do(func() { close(release) })
+	b.wg.Wait()
+
+	mu.Lock()
+	got := strings.Join(seen, ", ")
+	mu.Unlock()
+	if got != "push fired again" {
+		t.Errorf("server saw %q, want only the new firing push", got)
+	}
+}
+
+// A firing alert that sends no push (a Live Activity with also notify off)
+// leaves a queued retract of its collapse id alone: nothing replaces the old
+// push, so it still has to come down.
+func TestQueuedRetractGoesOnWhenTheReFireSendsNoPush(t *testing.T) {
+	asked, release := make(chan struct{}), make(chan struct{})
+	var askOnce, releaseOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/notifications/retract" {
+			askOnce.Do(func() { close(asked) })
+			<-release
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"devices":1}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	cfg := retractConfig()
+	cfg.Ack, cfg.AlsoNotify = false, false
+	b := newQueueBridge(t, srv.URL, cfg)
+	dl := &recLog{}
+	b.deliveryLog = dl
+
+	b.mu.Lock()
+	st := trackedHighCPU("fp1")
+	st.notifyOnly = true
+	st.lastSeen = time.Now().Add(-time.Hour)
+	b.active["HighCPU"] = st
+	b.mu.Unlock()
+	b.sweepStale(context.Background(), time.Minute)
+	<-asked
+
+	raw, _ := json.Marshal(webhookPayload{Alerts: []alert{firingAlert()}})
+	if err := b.ProcessWebhook(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	b.wg.Wait()
+	releaseOnce.Do(func() { close(release) })
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		b.mu.Lock()
+		busy := b.retracting != ""
+		b.mu.Unlock()
+		if !busy {
+			break
+		}
+	}
+	if e := dl.find("retracted"); e == nil || !e.ok {
+		t.Errorf("delivery log retracted = %+v, want the queued retract through", e)
 	}
 }

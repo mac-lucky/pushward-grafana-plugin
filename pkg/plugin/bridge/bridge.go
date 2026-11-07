@@ -1233,13 +1233,23 @@ func alertCollapseID(alertname string) string {
 // push with it. retract false sends the resolved push in any case: the Live
 // Activity did not end, or the alert fires again in the same payload.
 // notifyOnly says whether the alert has no Live Activity.
+//
+// With retract the caller marked the id ended. A firing alert taken under it
+// since, in another webhook, cleared the mark (firedAgain), and its push
+// replaces the old one: then neither the retract nor the resolved push goes
+// out. A queued retract of an earlier end of the id that fails meanwhile
+// clears the mark too, and the backstop's end then sends nothing either.
 func (b *Bridge) sendResolved(ctx context.Context, logger *slog.Logger, a alert, slug, tag, alertname string, notifyOnly, retract bool) {
 	b.cancelAck(ctx, logger, alertname, tag, b.ackFor(notifyOnly))
 	if retract && b.cfg.RetractOnResolve {
+		if !b.stillEnded(alertname) {
+			logger.Info("the alert fired again, its retract is dropped")
+			return
+		}
 		rctx, cancel := context.WithTimeout(ctx, retractTimeout)
 		retracted, _ := b.retractAlert(rctx, b.retractClient, logger, alertname, tag)
 		cancel()
-		if retracted {
+		if retracted || !b.stillEnded(alertname) {
 			return
 		}
 	}
@@ -1426,8 +1436,9 @@ func (b *Bridge) retractAlert(ctx context.Context, c *pushward.Client, logger *s
 // for the paths that end an alert without a resolved push to fall back on
 // (untracked resolve, sweep, End, a resolve that overtook the firing push).
 // They never wait on it, and its throttled retracts are tried again instead
-// of lost. The caller marked the id ended; a firing push that cleared the mark
-// since keeps its push. A full or stopped queue drops the retract, logged.
+// of lost. The caller marked the id ended; a firing alert taken to push under
+// it since cleared the mark and keeps its push. A full or stopped queue drops
+// the retract, logged.
 func (b *Bridge) queueRetract(logger *slog.Logger, alertname, tag string) {
 	id := alertCollapseID(alertname)
 	b.mu.Lock()
@@ -1497,9 +1508,9 @@ func (b *Bridge) closeRetracts(pending ...retractJob) {
 }
 
 // runRetract makes the queued retract j, given up at its deadline. It is
-// skipped, or stopped while it waits out a 429, once a firing push went out
-// under its collapse id: it would take that push down. One that fails forgets
-// the id, so a later resolve tries again.
+// skipped, or stopped while it waits out a 429, once a firing alert is taken
+// to push under its collapse id: it would take that push down. One that fails
+// forgets the id, so a later resolve tries again.
 func (b *Bridge) runRetract(ctx context.Context, j retractJob) {
 	id := alertCollapseID(j.alertname)
 	ctx, cancel := context.WithDeadline(ctx, j.deadline)
@@ -1535,9 +1546,19 @@ func (b *Bridge) firedAgain(id string) {
 	}
 }
 
+// stillEnded reports whether the alert pushes under alertname's collapse id
+// are still marked ended.
+func (b *Bridge) stillEnded(alertname string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.ended[alertCollapseID(alertname)]
+	return ok
+}
+
 // endedOnce records that this instance ended the alert pushes under
 // collapse id and reports whether that is news: false when it had ended them
-// already with no firing push under id since. The caller holds b.mu.
+// already with no firing alert taken to push under id since. The caller holds
+// b.mu.
 func (b *Bridge) endedOnce(id string) bool {
 	if _, ok := b.ended[id]; ok {
 		return false
