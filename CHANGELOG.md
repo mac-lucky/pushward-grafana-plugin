@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.15.1
+
+- Retract on resolve: an alert that ends without a resolved push to fall back on (the stale sweep, ending it from the Activities page, a resolve after a settings save restarted the plugin) now has its retract queued and sent at the pace PushWard's rate limit allows, instead of losing every retract past the first few. A queued retract is given up after 2 minutes, and one dropped when the plugin stops is written to the delivery log.
+- A resolve that arrives after the plugin already ended the alert no longer retracts it a second time, and no longer takes back the Resolved push that stays up while the Live Activity could not be ended.
+- An alert that fires again cancels a retract of its earlier end that is still waiting, so the retract no longer takes the new notification down. A resolve that sees its alert fire again in another webhook before it starts its retract sends neither the retract nor the Resolved.
+- A payload that resolves several alerts sharing one notification retracts it once.
+
 ## 0.15.0
 
 - New setting **Retract on resolve** under **Also send a push notification**, off by default. When the last instance of an alert resolves, its push notification is taken off your devices instead of a "Resolved" push replacing it. If PushWard could reach no device, the retract fails, or the Live Activity still shows the alert firing, the "Resolved" push goes out as before. An alert that ends without a resolve (the stale sweep, ending it from the Activities page, or a resolve after a settings save restarted the plugin) has its notification taken back too. It works on PushWard 1.20 or later on iPhone, iPad and Mac and on Android; Apple Watch and an app that was force-quit keep the notification. Alerts without an `alertname` label share one notification, so resolving one takes the others back as well.
