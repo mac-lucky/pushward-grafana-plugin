@@ -1080,18 +1080,27 @@ func TestResolveSparesAnAlertThatFiresAgainMeanwhile(t *testing.T) {
 // The ended mark of a resolve can go while it runs without the alert firing
 // again: the overtaken firing push queued a retract under it that found the
 // queue full or failed fast. The resolve still ends the push then; only an
-// alert tracked again under the collapse id makes it stand down.
+// alert tracked again under the collapse id that pushes under it makes it
+// stand down.
 func TestResolveGoesOnWhenItsEndedMarkIsDropped(t *testing.T) {
+	const retract = "/notifications/retract"
 	cases := []struct {
 		name string
 		// drop is the path whose handler drops the mark, before it answers.
-		drop         string
-		refire       bool
-		wantResolved int
+		drop string
+		// refire, when set, is the alert the handler tracks again: "push"
+		// a notify-only one, "activity" a Live Activity one.
+		refire        string
+		alsoNotifyOff bool
+		wantResolved  int
 	}{
-		{"before the retract", "/notifications/receipts/cancel", false, 1},
-		{"after a retract that reached no device", "/notifications/retract", false, 1},
-		{"after a retract that reached no device, fired again", "/notifications/retract", true, 0},
+		{"before the retract", "/notifications/receipts/cancel", "", false, 1},
+		{"after a retract that reached no device", retract, "", false, 1},
+		{"after a retract that reached no device, fired again", retract, "push", false, 0},
+		{"fired again as a Live Activity, also notify on", retract, "activity", false, 0},
+		{"fired again as a push, also notify off", retract, "push", true, 0},
+		// The activity sends no push under the id, so the old one stays up.
+		{"fired again as a Live Activity, also notify off", retract, "activity", true, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1102,9 +1111,9 @@ func TestResolveGoesOnWhenItsEndedMarkIsDropped(t *testing.T) {
 				if r.URL.Path == tc.drop {
 					b.mu.Lock()
 					delete(b.ended, alertCollapseID("HighCPU"))
-					if tc.refire {
+					if tc.refire != "" {
 						st := trackedHighCPU("fp2")
-						st.notifyOnly = true
+						st.notifyOnly = tc.refire == "push"
 						b.active["HighCPU"] = st
 					}
 					b.mu.Unlock()
@@ -1134,7 +1143,9 @@ func TestResolveGoesOnWhenItsEndedMarkIsDropped(t *testing.T) {
 				}
 			}))
 			t.Cleanup(srv.Close)
-			b = newTestBridge(t, srv.URL, nil, retractConfig())
+			cfg := retractConfig()
+			cfg.AlsoNotify = !tc.alsoNotifyOff
+			b = newTestBridge(t, srv.URL, nil, cfg)
 			st := trackedHighCPU("fp1")
 			st.notifyOnly = true
 			b.active["HighCPU"] = st
