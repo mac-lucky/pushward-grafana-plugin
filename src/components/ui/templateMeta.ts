@@ -32,6 +32,7 @@ const META: Record<string, TemplateMeta> = {
   battery: { icon: 'bolt', label: 'Battery' },
   schedule: { icon: 'calendar-alt', label: 'Schedule' },
   flow: { icon: 'sitemap', label: 'Flow' },
+  heatmap: { icon: 'gf-grid', label: 'Heatmap' },
   generic: { icon: 'gf-layout-simple', label: 'Generic' },
   steps: { icon: 'process', label: 'Steps' },
   alert: { icon: 'exclamation-triangle', label: 'Alert' },
@@ -39,6 +40,7 @@ const META: Record<string, TemplateMeta> = {
   log: { icon: 'file-alt', label: 'Log' },
   media: { icon: 'play', label: 'Media' },
   approval: { icon: 'question-circle', label: 'Approval' },
+  checklist: { icon: 'check-square', label: 'Checklist' },
 };
 
 export function templateMeta(template?: string): TemplateMeta {

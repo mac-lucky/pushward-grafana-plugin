@@ -23,6 +23,7 @@ describe('templateMeta', () => {
     expect(templateMeta('battery').label).toBe('Battery');
     expect(templateMeta('schedule').label).toBe('Schedule');
     expect(templateMeta('flow').label).toBe('Flow');
+    expect(templateMeta('heatmap')).toMatchObject({ icon: 'gf-grid', label: 'Heatmap' });
   });
 
   // The Activities table renders through this same map off a raw GET
@@ -36,12 +37,13 @@ describe('templateMeta', () => {
     expect(templateMeta('log').label).toBe('Log');
     expect(templateMeta('media').label).toBe('Media');
     expect(templateMeta('approval').label).toBe('Approval');
+    expect(templateMeta('checklist')).toMatchObject({ icon: 'check-square', label: 'Checklist' });
   });
 
   // 'apps' is the unknown-template fallback, so reusing it would make a known
   // template indistinguishable from an unrecognised one.
   it('does not reuse the unknown-template icon for a known template', () => {
-    for (const id of ['generic', 'steps', 'alert', 'board', 'log', 'media', 'approval']) {
+    for (const id of ['generic', 'steps', 'alert', 'board', 'log', 'media', 'approval', 'checklist', 'heatmap']) {
       expect(templateMeta(id).icon).not.toBe('apps');
     }
   });
