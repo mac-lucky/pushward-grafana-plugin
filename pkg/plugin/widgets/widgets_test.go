@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,6 +106,14 @@ func TestValidateRejectsBadConfigs(t *testing.T) {
 		"stale_after under 3x":    `[{"slug":"a","query":"up","interval":"60s","stale_after":120}]`,
 		"stale_after on countdown": `[{"slug":"a","template":"countdown","stale_after":300,
 		   "content":{"end_date":"2026-12-24T18:00:00Z"}}]`,
+		"unknown style":            `[{"slug":"a","query":"up","content":{"style":"fancy"}}]`,
+		"unknown size":             `[{"slug":"a","query":"up","content":{"style_by_size":{"tiny":"bold"}}}]`,
+		"empty style for a size":   `[{"slug":"a","query":"up","content":{"style_by_size":{"large":""}}}]`,
+		"size named twice":         `[{"slug":"a","query":"up","content":{"style_by_size":{"large":"bold","Large":"classic"}}}]`,
+		"unknown density":          `[{"slug":"a","template":"stat_list","content":{"density":"dense"},"stat_rows":[{"label":"x","query":"q","value_template":"{{.Value}}"}]}]`,
+		"unknown density for size": `[{"slug":"a","template":"stat_list","content":{"density_by_size":{"small":"tight"}},"stat_rows":[{"label":"x","query":"q","value_template":"{{.Value}}"}]}]`,
+		"density on value":         `[{"slug":"a","query":"up","content":{"density":"compact"}}]`,
+		"density by size on gauge": `[{"slug":"a","template":"gauge","query":"up","content":{"min_value":0,"max_value":1,"density_by_size":{"small":"compact"}}}]`,
 	}
 	for name, raw := range cases {
 		if _, err := ParseWidgets(json.RawMessage(raw)); err == nil {
@@ -349,6 +359,47 @@ func TestSubtitleTimerReachesContent(t *testing.T) {
 	}
 	if c.Subtitle != "since boot" {
 		t.Errorf("subtitle = %q, want the static fallback preserved", c.Subtitle)
+	}
+}
+
+// A look the server refuses is a 422, and a failed create takes the whole
+// engine down, so it has to fail at load instead.
+func TestLooksAreCheckedAtLoad(t *testing.T) {
+	raw := `[
+	  {"slug":"svc","template":"status","query":"up","content":{"style":"classic"}},
+	  {"slug":"g","template":"gauge","query":"up","content":{"min_value":0,"max_value":1,"style":"Bold",
+	    "style_by_size":{"Lock_Screen":"Classic","small":"standard"}}},
+	  {"slug":"mem","query":"up","content":{"style_by_size":{}}},
+	  {"slug":"list","template":"stat_list","content":{"density":"Compact","density_by_size":{"LARGE":"comfortable","small":"auto"}},
+	    "stat_rows":[{"label":"x","query":"q","value_template":"{{.Value}}"}]}
+	]`
+	cfgs, err := ParseWidgets(json.RawMessage(raw))
+	if err != nil {
+		t.Fatalf("ParseWidgets: %v", err)
+	}
+	// The server ignores case, so a capitalised key or value must not stop
+	// the engine here.
+	g, list := cfgs[1].Content, cfgs[3].Content
+	if g.Style != "bold" || !maps.Equal(g.StyleBySize, map[string]string{"lock_screen": "classic", "small": "standard"}) {
+		t.Errorf("gauge looks = %q %v, want them lowercased", g.Style, g.StyleBySize)
+	}
+	if list.Density != "compact" || !maps.Equal(list.DensityBySize, map[string]string{"large": "comfortable", "small": "auto"}) {
+		t.Errorf("stat_list density = %q %v, want it lowercased", list.Density, list.DensityBySize)
+	}
+	if cfgs[2].Content.StyleBySize != nil {
+		t.Errorf("empty style_by_size = %v, want it dropped", cfgs[2].Content.StyleBySize)
+	}
+
+	for _, tc := range [][2]string{
+		{`{"slug":"a","query":"up","content":{"style":"neon"}}`, `unknown content.style "neon" (allowed: standard|bold|classic)`},
+		{`{"slug":"a","query":"up","content":{"style_by_size":{"watch":"bold"}}}`, `unknown content.style_by_size key "watch" (allowed: small|medium|large|lock_screen)`},
+		{`{"slug":"a","query":"up","content":{"style_by_size":{"large":"fancy"}}}`, `unknown content.style_by_size.large "fancy" (allowed: standard|bold|classic)`},
+		{`{"slug":"a","template":"stat_list","content":{"density_by_size":{"small":"tight"}},"stat_rows":[{"label":"x","query":"q","value_template":"{{.Value}}"}]}`, `unknown content.density_by_size.small "tight" (allowed: auto|compact|comfortable)`},
+		{`{"slug":"a","query":"up","content":{"density":"compact"}}`, `content.density and content.density_by_size are only available for template stat_list, not "value"`},
+	} {
+		if _, err := ParseWidgets(json.RawMessage("[" + tc[0] + "]")); err == nil || !strings.Contains(err.Error(), tc[1]) {
+			t.Errorf("%s: err = %v, want %q", tc[0], err, tc[1])
+		}
 	}
 }
 

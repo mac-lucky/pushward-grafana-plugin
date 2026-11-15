@@ -1,7 +1,18 @@
 import React from 'react';
 import { css } from '@emotion/css';
 import { GrafanaTheme2 } from '@grafana/data';
-import { Button, Combobox, Field, IconButton, Input, Stack, Text, useStyles2, type ComboboxOption } from '@grafana/ui';
+import {
+  Button,
+  Combobox,
+  ControlledCollapse,
+  Field,
+  IconButton,
+  Input,
+  Stack,
+  Text,
+  useStyles2,
+  type ComboboxOption,
+} from '@grafana/ui';
 import type { WidgetConfig } from './AppConfig';
 import { creatableTemplates } from '../ui/templateMeta';
 
@@ -18,6 +29,31 @@ const TEMPLATE_OPTIONS: Array<ComboboxOption<string>> = creatableTemplates();
 // unavailable there, so the picker says so at the point of choosing.
 const NEW_IN_1_6 = new Set(['trend', 'countdown']);
 
+// The empty value saves no key at all, which leaves the pick to the user in the
+// app (and drops a value this plugin sent before).
+const UNSET: ComboboxOption<string> = { label: 'Not set (choose in the app)', value: '' };
+const SIZE_UNSET: ComboboxOption<string> = { label: 'Not set', value: '' };
+
+// The server's lists of looks, row densities and sizes. Every template offers
+// every look; row density is stat_list only. Keep in sync with
+// pkg/plugin/widgets/config.go.
+const STYLE_OPTIONS: Array<ComboboxOption<string>> = [
+  { label: 'Standard', value: 'standard' },
+  { label: 'Bold', value: 'bold' },
+  { label: 'Classic', value: 'classic' },
+];
+const DENSITY_OPTIONS: Array<ComboboxOption<string>> = [
+  { label: 'Auto', value: 'auto' },
+  { label: 'Compact', value: 'compact' },
+  { label: 'Comfortable', value: 'comfortable' },
+];
+const SIZES: Array<ComboboxOption<string>> = [
+  { label: 'Small', value: 'small' },
+  { label: 'Medium', value: 'medium' },
+  { label: 'Large', value: 'large' },
+  { label: 'Lock Screen', value: 'lock_screen' },
+];
+
 const MODE_OPTIONS: Array<ComboboxOption<string>> = [
   { label: 'On change', value: 'on_change' },
   { label: 'Always', value: 'always' },
@@ -28,6 +64,30 @@ const NUM_W = 18;
 
 function content(w: WidgetConfig): WidgetContent {
   return (w.content as WidgetContent) ?? {};
+}
+// A hand-written look may be capitalised; the server and backend lowercase it.
+function lower(v: unknown): string {
+  return typeof v === 'string' ? v.toLowerCase() : '';
+}
+// bySize reads a style_by_size or density_by_size map the way the backend
+// does, keys and values lowercased.
+function bySize(v: unknown): Record<string, string> {
+  const m: Record<string, string> = {};
+  for (const [k, s] of Object.entries(v && typeof v === 'object' ? v : {})) {
+    m[k.toLowerCase()] = lower(s);
+  }
+  return m;
+}
+// withSize sets one size of such a map ('' removes it) and drops a map left
+// empty, so an unset size is never sent.
+function withSize(v: unknown, size: string, value: string): Record<string, string> | undefined {
+  const m = bySize(v);
+  if (value) {
+    m[size] = value;
+  } else {
+    delete m[size];
+  }
+  return Object.keys(m).length > 0 ? m : undefined;
 }
 function rows(w: WidgetConfig): StatRow[] {
   return Array.isArray(w.stat_rows) ? (w.stat_rows as StatRow[]) : [];
@@ -107,12 +167,18 @@ export function WidgetBuilder({ widgets, onChange }: WidgetBuilderProps) {
         patch.query = '';
       }
     }
+    const next = { ...content(w) };
     // A leftover date pair is not inert on progress: it makes the bar advance
     // on device instead of following the query. Drop the countdown fields
     // anywhere they'd change behaviour rather than be ignored.
     if (template !== 'countdown' && template !== 'progress') {
-      patch.content = { ...content(w), start_date: undefined, end_date: undefined, expired_text: undefined };
+      next.start_date = next.end_date = next.expired_text = undefined;
     }
+    // Row density is stat_list only; the server refuses it on any other template.
+    if (template !== 'stat_list') {
+      next.density = next.density_by_size = undefined;
+    }
+    patch.content = next;
     update(i, patch);
   };
 
@@ -143,6 +209,26 @@ export function WidgetBuilder({ widgets, onChange }: WidgetBuilderProps) {
         const isTrend = w.template === 'trend';
         const isRanged = w.template === 'progress' || w.template === 'gauge';
         const isFanout = typeof w.query_all === 'string' && w.query_all !== '';
+        const sizeFields = (
+          key: 'style_by_size' | 'density_by_size',
+          noun: string,
+          options: Array<ComboboxOption<string>>
+        ) => (
+          <Stack direction="row" gap={2} wrap="wrap">
+            {SIZES.map((size) => (
+              <Field key={size.value} label={`${size.label} ${noun}`}>
+                <Combobox
+                  width={NUM_W}
+                  options={[SIZE_UNSET, ...options]}
+                  value={bySize(c[key])[size.value] ?? ''}
+                  onChange={(opt: ComboboxOption<string>) =>
+                    updateContent(i, { [key]: withSize(c[key], size.value, opt.value) })
+                  }
+                />
+              </Field>
+            ))}
+          </Stack>
+        );
         return (
           <div key={i} className={s.card}>
             <div className={s.cardHeader}>
@@ -172,7 +258,33 @@ export function WidgetBuilder({ widgets, onChange }: WidgetBuilderProps) {
                   onChange={(opt: ComboboxOption<string>) => changeTemplate(i, opt.value)}
                 />
               </Field>
+              <Field label="Style" description="Overrides the style picked in the PushWard app.">
+                <Combobox
+                  width={W}
+                  options={[UNSET, ...STYLE_OPTIONS]}
+                  value={lower(c.style)}
+                  onChange={(opt: ComboboxOption<string>) => updateContent(i, { style: opt.value || undefined })}
+                />
+              </Field>
+              {isStatList && (
+                <Field label="Row density" description="Overrides the Row Density picked in the PushWard app.">
+                  <Combobox
+                    width={W}
+                    options={[UNSET, ...DENSITY_OPTIONS]}
+                    value={lower(c.density)}
+                    onChange={(opt: ComboboxOption<string>) => updateContent(i, { density: opt.value || undefined })}
+                  />
+                </Field>
+              )}
             </Stack>
+
+            <ControlledCollapse
+              label="Override per size"
+              isOpen={c.style_by_size !== undefined || c.density_by_size !== undefined}
+            >
+              {sizeFields('style_by_size', 'style', STYLE_OPTIONS)}
+              {isStatList && sizeFields('density_by_size', 'row density', DENSITY_OPTIONS)}
+            </ControlledCollapse>
 
             {!isStatList &&
               !isCountdown &&

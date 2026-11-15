@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -52,6 +53,16 @@ var validWidgetTemplates = map[string]bool{
 	"value": true, "progress": true, "status": true, "gauge": true, "stat_list": true,
 	"trend": true, "countdown": true,
 }
+
+// The looks every template offers, the keys of style_by_size and
+// density_by_size, and the stat_list row densities, as the server lists them.
+// Keep in sync with the option lists in
+// src/components/AppConfig/WidgetBuilder.tsx.
+var (
+	widgetStyles      = []string{"standard", "bold", "classic"}
+	widgetSizes       = []string{"small", "medium", "large", "lock_screen"}
+	statListDensities = []string{"auto", "compact", "comfortable"}
+)
 
 // validTimerStyles allows the empty string because the server reads it as the
 // default "timer" style.
@@ -176,6 +187,15 @@ type WidgetContentConfig struct {
 	// Subtitle stays as the static fallback.
 	SubtitleTimer *TimerConfig `json:"subtitle_timer,omitempty"`
 
+	// Style is the look the widget is drawn in, one of widgetStyles, and
+	// StyleBySize the look for one size (keys from widgetSizes). Density and
+	// DensityBySize do the same for the stat_list row density. Each overrides
+	// the user's pick in the app; empty sends nothing and leaves it to them.
+	Style         string            `json:"style,omitempty"`
+	StyleBySize   map[string]string `json:"style_by_size,omitempty"`
+	Density       string            `json:"density,omitempty"`
+	DensityBySize map[string]string `json:"density_by_size,omitempty"`
+
 	// Parsed forms of the date fields above, populated by Validate.
 	startDate     *time.Time
 	endDate       *time.Time
@@ -184,6 +204,11 @@ type WidgetContentConfig struct {
 
 // ToWidgetContent maps the config shape to the typed pushward content struct.
 // Value is left unset; the manager fills it per tick.
+//
+// shortcut: Style, StyleBySize, Density and DensityBySize are validated but
+// not sent yet, because shared/pushward.WidgetContent has none of them at the
+// pinned version; map them here in the same commit that bumps shared.
+// TestLooksRideOnEveryRequest fails after that bump until they are mapped.
 func (w WidgetContentConfig) ToWidgetContent() pushward.WidgetContent {
 	return pushward.WidgetContent{
 		Icon:            w.Icon,
@@ -399,7 +424,59 @@ func (w *WidgetConfig) validateContent(idx int) error {
 	if c.MinValue != nil && c.MaxValue != nil && *c.MinValue >= *c.MaxValue {
 		return fail(fmt.Errorf("content.min_value (%g) must be less than content.max_value (%g)", *c.MinValue, *c.MaxValue))
 	}
+	// The server ignores the case of these; lowercase so the checks match.
+	c.Style, c.Density = strings.ToLower(c.Style), strings.ToLower(c.Density)
+	if c.Style != "" {
+		if err := oneOf("content.style", c.Style, widgetStyles); err != nil {
+			return fail(err)
+		}
+	}
+	if c.StyleBySize, err = bySize("content.style_by_size", c.StyleBySize, widgetStyles); err != nil {
+		return fail(err)
+	}
+	if c.Density != "" {
+		if err := oneOf("content.density", c.Density, statListDensities); err != nil {
+			return fail(err)
+		}
+	}
+	if c.DensityBySize, err = bySize("content.density_by_size", c.DensityBySize, statListDensities); err != nil {
+		return fail(err)
+	}
+	if w.Template != "stat_list" && (c.Density != "" || c.DensityBySize != nil) {
+		return fail(fmt.Errorf("content.density and content.density_by_size are only available for template stat_list, not %q", w.Template))
+	}
 	return nil
+}
+
+func oneOf(field, v string, allowed []string) error {
+	if slices.Contains(allowed, v) {
+		return nil
+	}
+	return fmt.Errorf("unknown %s %q (allowed: %s)", field, v, strings.Join(allowed, "|"))
+}
+
+// bySize lowercases a per-size map and checks its keys and values the way the
+// server does. An empty map comes back nil, which the server stores as absent.
+func bySize(field string, m map[string]string, allowed []string) (map[string]string, error) {
+	if len(m) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		size := strings.ToLower(k)
+		if err := oneOf(field+" key", size, widgetSizes); err != nil {
+			return nil, err
+		}
+		if _, dup := out[size]; dup {
+			return nil, fmt.Errorf("%s names %s twice", field, size)
+		}
+		v = strings.ToLower(v)
+		if err := oneOf(field+"."+size, v, allowed); err != nil {
+			return nil, err
+		}
+		out[size] = v
+	}
+	return out, nil
 }
 
 // parseWidgetDate parses an optional RFC 3339 timestamp within the server's

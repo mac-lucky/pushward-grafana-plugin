@@ -32,6 +32,16 @@ apps:
       #     interval: 60s
       #     stale_after: 300
       #     content: { unit: '%', icon: cpu, min_value: 0, max_value: 100 }
+      #   - slug: api-up
+      #     name: API
+      #     template: status
+      #     query: up{job="api"}
+      #     # style: standard | bold | classic, on any template; style_by_size
+      #     # sets one size (small, medium, large, lock_screen). A stat_list
+      #     # also takes density (auto | compact | comfortable) and
+      #     # density_by_size. These override the pick made in the app; leave
+      #     # them out to let the app decide.
+      #     content: { icon: server.rack, style: classic, style_by_size: { large: bold } }
       #   - slug: request-rate
       #     name: Requests
       #     template: trend       # sparkline from the last 48 polls
