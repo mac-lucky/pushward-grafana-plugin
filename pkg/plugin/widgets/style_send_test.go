@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -35,13 +34,6 @@ func TestLooksRideOnEveryRequest(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// shortcut: shared/pushward.WidgetContent has none of these fields at
-			// the pinned version, so a set look cannot be sent yet. Once shared
-			// is bumped these cases run and fail until ToWidgetContent maps
-			// them; drop the skip in that change.
-			if _, ok := reflect.TypeFor[pushward.WidgetContent]().FieldByName(tc.field); tc.field != "" && !ok {
-				t.Skipf("shared/pushward.WidgetContent has no %s field at the pinned version", tc.field)
-			}
 			reqs := make(chan [2]string, 16)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				b, _ := io.ReadAll(r.Body)

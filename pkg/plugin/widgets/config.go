@@ -204,11 +204,6 @@ type WidgetContentConfig struct {
 
 // ToWidgetContent maps the config shape to the typed pushward content struct.
 // Value is left unset; the manager fills it per tick.
-//
-// shortcut: Style, StyleBySize, Density and DensityBySize are validated but
-// not sent yet, because shared/pushward.WidgetContent has none of them at the
-// pinned version; map them here in the same commit that bumps shared.
-// TestLooksRideOnEveryRequest fails after that bump until they are mapped.
 func (w WidgetContentConfig) ToWidgetContent() pushward.WidgetContent {
 	return pushward.WidgetContent{
 		Icon:            w.Icon,
@@ -224,7 +219,23 @@ func (w WidgetContentConfig) ToWidgetContent() pushward.WidgetContent {
 		EndDate:         w.endDate,
 		ExpiredText:     w.ExpiredText,
 		SubtitleTimer:   w.subtitleTimer,
+		Style:           pushward.WidgetStyle(w.Style),
+		StyleBySize:     styleBySize(w.StyleBySize),
+		Density:         w.Density,
+		DensityBySize:   w.DensityBySize,
 	}
+}
+
+// styleBySize keeps nil for an unset map so the key is never sent.
+func styleBySize(m map[string]string) map[string]pushward.WidgetStyle {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]pushward.WidgetStyle, len(m))
+	for k, v := range m {
+		out[k] = pushward.WidgetStyle(v)
+	}
+	return out
 }
 
 // ParseWidgets decodes the jsonData.widgets array into validated WidgetConfigs.
