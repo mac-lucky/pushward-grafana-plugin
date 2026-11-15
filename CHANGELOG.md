@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.0
+
+- Widgets: pick a look for each widget in the builder and in provisioned config. `style` takes `standard`, `bold` or `classic`, and `style_by_size` sets it for one size (`small`, `medium`, `large`, `lock_screen`). A stat list also takes `density` and `density_by_size`. A look you set here wins over the one picked in the app; leave it empty to keep the app's pick. It needs PushWard 1.30 or later on iPhone and iPad, or 1.4 or later on Android; older apps ignore it.
+
 ## 0.15.2
 
 - Retract on resolve: a resolve that overtakes its own firing push now still retracts it, or sends the Resolved push, when the retract queue is full or a queued retract fails. Before, it sent nothing and the firing notification stayed up.
