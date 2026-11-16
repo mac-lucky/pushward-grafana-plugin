@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.17.0
+
+- The Activities and Widgets pages name a checklist Live Activity or a heatmap widget and show its icon, for ones sent to your account from the API, the CLI or another integration. The widget builder does not create heatmaps: a heatmap needs one value per day, which a single Grafana query does not give.
+
 ## 0.16.0
 
 - Widgets: pick a look for each widget in the builder and in provisioned config. `style` takes `standard`, `bold` or `classic`, and `style_by_size` sets it for one size (`small`, `medium`, `large`, `lock_screen`). A stat list also takes `density` and `density_by_size`. A look you set here wins over the one picked in the app; leave it empty to keep the app's pick. It needs PushWard 1.30 or later on iPhone and iPad, or 1.4 or later on Android; older apps ignore it.
