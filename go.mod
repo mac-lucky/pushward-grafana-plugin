@@ -4,7 +4,7 @@ go 1.27.2
 
 require (
 	github.com/grafana/grafana-plugin-sdk-go v0.298.0
-	github.com/mac-lucky/pushward-integrations/shared v0.0.0-20261116014346-35e64756277e
+	github.com/mac-lucky/pushward-integrations/shared v0.0.0-20261116135848-83465eaf6da3
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 )
