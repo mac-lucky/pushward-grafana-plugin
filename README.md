@@ -107,7 +107,7 @@ A `stat_list` row can also follow its data, again from the JSON view only. `valu
 
 A row `timer` can take `"from_value": true` in place of `date`: the polled value is read as Unix seconds and the row counts down to it. Use `bottomk(1, ...)` rather than `min(...)` to pick the earliest of a set of reset times, since `min` drops the labels the label template needs. The row costs a push when the target moves, not every poll. Older clients without timers show the value instead, and `{{clock .Value "Europe/Warsaw"}}` renders that as a time of day in the zone you name (`14:35`, with the date in front when it is not today). Leave the zone out and you get UTC: Grafana starts plugins without the host's `TZ`.
 
-`battery`, `schedule` and `flow` exist on the server but not here. Each needs several independent readings in one payload - per-device charge levels, an hourly price curve, the four sides of an energy flow - which one query per widget cannot express. Use the REST API or the Home Assistant integration for those. `heatmap` is missing for a similar reason: it takes 7 to 154 daily values in one push. Send it through the REST API.
+`battery`, `schedule` and `flow` exist on the server but not here. Each needs several independent readings in one payload - per-device charge levels, an hourly price curve, the four sides of an energy flow - which one query per widget cannot express. Use the REST API or the Home Assistant integration for those. `heatmap` is missing for a similar reason: it takes 7 to 154 daily values in one push. Send it through the REST API, or track a sensor with the Home Assistant integration's heatmap widget (0.58.0 and later).
 
 ### Before you add a trend or countdown widget
 
