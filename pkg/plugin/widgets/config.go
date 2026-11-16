@@ -48,7 +48,8 @@ var widgetSlugRE = regexp.MustCompile(`^[a-z0-9_-]{1,128}$`)
 // validWidgetTemplates lists the renderers this plugin can drive from PromQL.
 // battery, schedule and flow are server templates the plugin deliberately does
 // not offer: each needs several independent readings per push, which the
-// one-query-per-widget poll model can't express.
+// one-query-per-widget poll model can't express. heatmap is left out too: it
+// takes 7-154 daily values per push.
 var validWidgetTemplates = map[string]bool{
 	"value": true, "progress": true, "status": true, "gauge": true, "stat_list": true,
 	"trend": true, "countdown": true,
