@@ -93,6 +93,7 @@ func newTestBridge(t *testing.T, url string, resolver GrafanaResolver, cfg Confi
 		grafanaClient: resolver,
 		active:        make(map[string]*alertState),
 		ended:         make(map[string]time.Time),
+		endedSlugs:    make(map[string]time.Time),
 		retracts:      make(chan retractJob, retractQueueCap),
 		webhookSlots:  make(chan struct{}, maxConcurrentWebhooks),
 		capDrops:      syncx.NewDropCounter(100),
@@ -732,7 +733,7 @@ func TestAckCanceledOnEveryEnd(t *testing.T) {
 		}, false},
 		{"resolved webhook for an untracked alert", func(b *Bridge) {
 			b.handleResolved(context.Background(), resolvedAlert(), nil)
-		}, false},
+		}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

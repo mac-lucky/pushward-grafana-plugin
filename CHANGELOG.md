@@ -4,6 +4,7 @@
 
 - The plugin's backend now checks who is calling. Until now any signed-in Viewer, and anyone on a Grafana with anonymous access, could post made-up alerts to the webhook and push them to your devices, end any Live Activity on your PushWard account, send test pushes, and read your activities and widgets. Now the webhook takes alerts only from the `pushward-alerts-webhook` service account the Connect wizard creates, so the contact point Connect set up keeps delivering without running Connect again. The pages need the Editor role, and sending a test or ending a Live Activity needs Admin. A Viewer who opens a page sees a message saying which role it needs. A contact point you set up by hand with another service account's token stops delivering; run Connect, or point it at the `pushward-alerts-webhook` token.
 - At most 16 alert webhooks are worked on at once. One that finds no free slot within 5 seconds is answered 503, and Grafana sends it again at the next group interval.
+- A resolve that arrives after a settings save or a restart of the plugin now ends the alert's Live Activity. Before, the activity stayed red until PushWard's stale timeout (24 hours by default) because the new plugin instance did not know about it. With **Also send a push notification** on and **Retract on resolve** off, the resolved push goes out too. The ended activity keeps the last value it showed. If the alert's other instances are still firing, their activity ends as well and comes back the next time Grafana sends them.
 
 ## 0.17.0
 

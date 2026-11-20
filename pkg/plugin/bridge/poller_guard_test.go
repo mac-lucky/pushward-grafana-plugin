@@ -26,7 +26,7 @@ func (nopQuerier) QueryInstantAll(context.Context, string, time.Time) ([]Labeled
 // that leaves a poller running against an ended activity.
 func TestStartPollerIfTracked(t *testing.T) {
 	poller := NewPoller(nopQuerier{}, pushward.NewClient("http://127.0.0.1:0", "hlk_x"), time.Hour)
-	b := &Bridge{active: make(map[string]*alertState), poller: poller}
+	b := &Bridge{active: make(map[string]*alertState), endedSlugs: make(map[string]time.Time), poller: poller}
 	t.Cleanup(func() {
 		poller.StopAll()
 		poller.Wait()

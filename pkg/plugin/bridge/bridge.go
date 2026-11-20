@@ -215,8 +215,14 @@ type Bridge struct {
 	// late webhook, or another alert without a name) neither retracts again
 	// nor sends. A queued retract that fails or is dropped forgets its id
 	// again. At most activeAlertCap; the oldest goes first.
-	ended    map[string]time.Time
-	retracts chan retractJob // see queueRetract
+	ended map[string]time.Time
+	// endedSlugs holds, with when, the slugs of the Live Activities this
+	// instance ended (a resolve, the backstop, End), so a resolve for one it
+	// no longer tracks neither ends it again nor sends a second resolved
+	// push. A firing alert tracked under the slug again forgets it. At most
+	// activeAlertCap; the oldest goes first.
+	endedSlugs map[string]time.Time
+	retracts   chan retractJob // see queueRetract
 	// webhookSlots bounds the webhooks processed at once (see ProcessWebhook).
 	webhookSlots chan struct{}
 	// retracting is the collapse id of the queued retract being made, and
@@ -331,6 +337,7 @@ func NewBridge(
 		cfg:           cfg,
 		active:        make(map[string]*alertState),
 		ended:         make(map[string]time.Time),
+		endedSlugs:    make(map[string]time.Time),
 		retracts:      make(chan retractJob, retractQueueCap),
 		webhookSlots:  make(chan struct{}, maxConcurrentWebhooks),
 		capDrops:      syncx.NewDropCounter(100),
@@ -550,6 +557,7 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 			return
 		}
 		notifyOnly = !b.wantsActivity(a)
+		delete(b.endedSlugs, slug)
 		if notifyOnly || b.cfg.AlsoNotify {
 			// A firing push follows (for a Live Activity alert, only after
 			// the activity calls), so no queued retract may go out first.
@@ -897,18 +905,24 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert, noRetract map[stri
 		// plugin while the alert was firing, or because the backstop, the
 		// sweep or End got there first (then ended says so). The tag is
 		// derived from the alert, so the repeats of its push can still be
-		// stopped. Without the instance list there is no telling whether
-		// this was the last instance: with a contact point grouped per
-		// instance, one instance resolving after a settings save also stops
-		// the repeats of those still firing, and a retract takes their push
-		// back too. Accepted; the next firing webhook notifies again. The
-		// labels tell which kind of push it was, if one was sent.
+		// stopped, and the slug, so its Live Activity can still be ended.
+		// Without the instance list there is no telling whether this was
+		// the last instance: with a contact point grouped per instance, one
+		// instance resolving after a settings save also stops the repeats
+		// of those still firing, ends their activity, and a retract takes
+		// their push back too. Accepted; the next firing webhook brings
+		// them back. The labels tell which kind of push it was, if one was
+		// sent. An alert name that fires in this payload is left alone.
 		notifyOnly := !b.wantsActivity(a)
 		retract := b.retractFor(notifyOnly) && !noRetract[id] && b.endedOnce(id)
+		end := !notifyOnly && !noRetract[id] && markOnce(b.endedSlugs, slug)
 		b.mu.Unlock()
 		b.cancelAck(ctx, logger, alertname, slug, b.ackFor(notifyOnly))
 		if retract {
 			b.queueRetract(logger, alertname, slug)
+		}
+		if end {
+			b.endUntracked(ctx, logger, a, slug, alertname)
 		}
 		return
 	}
@@ -931,6 +945,9 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert, noRetract map[stri
 	primary := state.primary
 	notifyOnly := state.notifyOnly
 	delete(b.active, mapKey)
+	if !notifyOnly {
+		markOnce(b.endedSlugs, slug)
+	}
 	retract := !noRetract[id]
 	// Another alert under the id (one without a name) was ended already, and
 	// what this one showed under it went with that.
@@ -998,6 +1015,42 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert, noRetract map[stri
 			linkSlug = ""
 		}
 		b.sendResolved(ctx, logger, a, linkSlug, slug, alertname, false, ended && retract)
+	}
+}
+
+// endUntracked ends the Live Activity of a resolved alert this instance does
+// not track, which a previous instance (before a settings save or restart)
+// left showing it firing. The caller stopped the acknowledge repeats. The
+// update carries no values: the timeline's series may be keyed by the
+// poller's metric labels, and the webhook's ref-ID keys would prune them as
+// orphans, while left out the merge keeps what the activity shows. A 4xx says
+// there is no activity to end. With AlsoNotify on and RetractOnResolve off the
+// resolved push goes out too, linked only to an activity that took the end.
+func (b *Bridge) endUntracked(ctx context.Context, logger *slog.Logger, a alert, slug, alertname string) {
+	b.poller.StopAndWait(slug) // a stale sweep's poller may still be ticking
+	content := b.buildContent(a, b.resolveSeverity(a), nil)
+	content.Icon = resolvedIcon
+	content.AccentColor = pushward.ColorGreen
+
+	linkSlug := ""
+	err := b.pwClient.UpdateActivity(ctx, slug, pushward.UpdateRequest{State: pushward.StateEnded, Content: content})
+	var he *pushward.HTTPError
+	switch {
+	case err == nil:
+		linkSlug = slug
+		logger.Info("activity of an untracked alert ended")
+		b.recordPushSent()
+		b.record(alertname, slug, "resolved", true, "")
+	case errors.As(err, &he) && he.StatusCode >= 400 && he.StatusCode < 500 && he.StatusCode != http.StatusTooManyRequests:
+		logger.Info("no activity to end for the untracked alert", "status", he.StatusCode)
+	default:
+		logger.Error("failed to end activity", "error", err)
+		b.recordError()
+		b.record(alertname, slug, "resolved", false, err.Error())
+	}
+
+	if b.cfg.AlsoNotify && !b.cfg.RetractOnResolve {
+		b.sendAlertNotification(ctx, logger, a, linkSlug, slug, alertname, true, false)
 	}
 }
 
@@ -1612,19 +1665,25 @@ func (b *Bridge) stillEnded(alertname string) bool {
 // already with no firing alert taken to push under id since. The caller holds
 // b.mu.
 func (b *Bridge) endedOnce(id string) bool {
-	if _, ok := b.ended[id]; ok {
+	return markOnce(b.ended, id)
+}
+
+// markOnce records key in m with the time and reports whether it is new
+// there. m holds at most activeAlertCap keys; the oldest goes first.
+func markOnce(m map[string]time.Time, key string) bool {
+	if _, ok := m[key]; ok {
 		return false
 	}
-	if len(b.ended) >= activeAlertCap {
+	if len(m) >= activeAlertCap {
 		var oldest string
-		for k, at := range b.ended {
-			if oldest == "" || at.Before(b.ended[oldest]) {
+		for k, at := range m {
+			if oldest == "" || at.Before(m[oldest]) {
 				oldest = k
 			}
 		}
-		delete(b.ended, oldest)
+		delete(m, oldest)
 	}
-	b.ended[id] = time.Now()
+	m[key] = time.Now()
 	return true
 }
 
@@ -1710,6 +1769,7 @@ func (b *Bridge) Forget(ctx context.Context, slug string) bool {
 			break
 		}
 	}
+	markOnce(b.endedSlugs, slug)
 	// Only a tracked alert says which push to take back.
 	var retract bool
 	if key != "" {
@@ -1868,6 +1928,9 @@ func (b *Bridge) checkAlertStates(ctx context.Context) {
 		// bumps lastSeen, and we must not tear down that fresh activity/poller.
 		if stillActive && cur.lastSeen.Equal(e.state.lastSeen) {
 			delete(b.active, e.name)
+			if !cur.notifyOnly {
+				markOnce(b.endedSlugs, cur.slug)
+			}
 			if b.retractFor(cur.notifyOnly) {
 				b.endedOnce(alertCollapseID(cur.alertname))
 			}

@@ -13,7 +13,7 @@ import (
 // entry by slug + stops its poller so a user-initiated End isn't resurrected.
 func TestActiveAlertsAndForget(t *testing.T) {
 	poller := NewPoller(nopQuerier{}, pushward.NewClient("http://127.0.0.1:0", "hlk_x"), time.Hour)
-	b := &Bridge{active: make(map[string]*alertState), poller: poller}
+	b := &Bridge{active: make(map[string]*alertState), endedSlugs: make(map[string]time.Time), poller: poller}
 	t.Cleanup(func() {
 		poller.StopAll()
 		poller.Wait()

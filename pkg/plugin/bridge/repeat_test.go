@@ -83,6 +83,7 @@ func newPollingBridge(t *testing.T, url string, q MetricsQuerier, resolver Grafa
 		poller:        poller,
 		grafanaClient: resolver,
 		active:        make(map[string]*alertState),
+		endedSlugs:    make(map[string]time.Time),
 		capDrops:      syncx.NewDropCounter(100),
 		cfg:           cfg,
 	}
