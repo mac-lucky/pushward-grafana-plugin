@@ -67,6 +67,10 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 func (a *App) authorize(need access, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if msg := a.denied(backend.PluginConfigFromContext(r.Context()), need); msg != "" {
+			if need == accessWebhook {
+				// Grafana shows the contact point failing; this says why.
+				slog.Warn("refused a webhook call", "reason", msg)
+			}
 			writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "message": msg})
 			return
 		}
@@ -90,8 +94,11 @@ func (a *App) denied(pc backend.PluginContext, need access) string {
 		// unique, so once the account exists no user can take its login.
 		// Without the Connect wizard's token there may be no such account.
 		// OrgID over Namespace: Grafana 12 fills OrgID from the caller.
-		if a.settings.WebhookToken == "" || u.Login != fmt.Sprintf("sa-%d-%s", pc.OrgID, webhookSAName) { //nolint:staticcheck
-			return "Only the PushWard contact point may post alerts here. Run the Connect wizard to set it up."
+		if a.settings.WebhookToken == "" {
+			return "PushWard has no webhook token yet. Run the Connect wizard, or provision secureJsonData.webhookToken with the token of the " + webhookSAName + " service account."
+		}
+		if u.Login != fmt.Sprintf("sa-%d-%s", pc.OrgID, webhookSAName) { //nolint:staticcheck
+			return "Only the PushWard contact point may post alerts here, with the token of the " + webhookSAName + " service account. Run the Connect wizard to set it up."
 		}
 	case accessAdmin:
 		if u.Role != "Admin" {

@@ -58,4 +58,5 @@ apps:
       #       icon: party.popper
     # secureJsonData:
     #   apiKey: hlk_...        # your PushWard integration key
-    #   webhookToken: ...      # set automatically by the Connect wizard
+    #   webhookToken: ...      # the pushward-alerts-webhook service account's token; Connect sets
+    #                          # it, a provisioned setup must (the webhook refuses alerts without it)

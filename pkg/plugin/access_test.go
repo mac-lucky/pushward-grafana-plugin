@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -81,13 +82,17 @@ func TestResourceAccess(t *testing.T) {
 }
 
 // Before the Connect wizard ran there may be no webhook service account, so
-// its login could still be free for a user to take: the webhook is closed.
+// its login could still be free for a user to take: the webhook is closed,
+// and the answer names the setting a provisioned install has to fill in.
 func TestWebhookNeedsConnect(t *testing.T) {
 	app, _ := newTestApp(t)
 	webhookSA := &backend.User{Login: "sa-1-pushward-alerts-webhook", Role: "Viewer"}
 	resp := callResourceAs(t, context.Background(), app, webhookSA, http.MethodPost, "webhook", []byte(`{"alerts":[]}`))
 	if resp.Status != http.StatusForbidden {
 		t.Errorf("webhook without a webhook token = %d, want 403", resp.Status)
+	}
+	if !strings.Contains(string(resp.Body), "secureJsonData.webhookToken") {
+		t.Errorf("403 body %s does not name secureJsonData.webhookToken", resp.Body)
 	}
 }
 

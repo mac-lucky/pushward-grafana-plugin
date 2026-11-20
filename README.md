@@ -63,7 +63,7 @@ Then enable the app under Administration > Plugins and data > Plugins > PushWard
 3. Run Connect. It creates the webhook contact point and a scoped viewer service-account token, and routes your alerts to it.
 4. Optional: tune severity mapping, history window, and poll interval, and declare widgets. Fire a test timeline to confirm the whole path before you depend on it.
 
-The plugin's pages need the Editor role in the organization; sending a test and ending a Live Activity need Admin. A Viewer sees a message saying so instead of the data, and anonymous access gets nothing. Only the `pushward-alerts-webhook` service account that Connect creates can post alerts to the webhook, so a contact point you set up by hand has to use that account's token.
+The plugin's pages need the Editor role in the organization; sending a test and ending a Live Activity need Admin. The check reads only the role in the organization, because that is all Grafana passes to the plugin: a Grafana server admin who is a Viewer or Editor there gets the same answer as any other Viewer or Editor. A Viewer sees a message saying so instead of the data, and anonymous access gets nothing. Only the `pushward-alerts-webhook` service account that Connect creates can post alerts to the webhook, and only once the plugin holds that account's token in `secureJsonData.webhookToken`. Connect sets up both. A contact point you set up by hand has to use that account's token; without Connect, see [Provision (GitOps)](#provision-gitops).
 
 Every alert's Live Activity gets the same **Priority** (0-10, default 5). Turn on **Priority from severity** (`priorityFromSeverity: true` in `jsonData`) to take it from the severity label instead: critical alerts get 10, info and `none` alerts 1 (or **Priority**, if lower), everything else keeps **Priority**. When a more severe instance of a firing alert shows up, the activity is raised to match. Two things follow from the priority, and both count every app and integration on your PushWard account, not just Grafana. When the account runs out of Live Activity slots, the lowest-priority activities are pushed off first (and come back when a slot frees). And iOS uses it to rank activities in the Dynamic Island and Smart Stack. That is why it is off by default.
 
@@ -129,9 +129,11 @@ The counters reset when Grafana restarts the plugin's backend process. If you wa
 
 Everything the Configuration page and Connect wizard set can live in git and be provisioned from files, so a fresh Grafana comes up already wired. This repo ships an example under `provisioning/plugins/`.
 
-- App settings via `provisioning/plugins/apps.yaml`: an `apps:` block with `jsonData` for the config and the `widgets` array, and `secureJsonData.apiKey` for the `hlk_` key.
+- App settings via `provisioning/plugins/apps.yaml`: an `apps:` block with `jsonData` for the config and the `widgets` array, `secureJsonData.apiKey` for the `hlk_` key, and `secureJsonData.webhookToken` for the webhook token below.
 - Datasource via `provisioning/datasources/*.yaml`.
-- The webhook contact point via `provisioning/alerting/*.yaml`.
+- The webhook contact point via `provisioning/alerting/*.yaml`, posting to `/api/plugins/pushward-alerts-app/resources/webhook` with `authorization_scheme: Bearer` and the webhook token as `authorization_credentials`.
+
+The webhook token belongs to a service account named exactly `pushward-alerts-webhook` (the Viewer role is enough), made in the same organization with Terraform or the Grafana API. The webhook takes alerts only from that account, and refuses every alert while `secureJsonData.webhookToken` is empty, so set the same token in both places. A setup that leaves either one out gets a 403 for each alert, which shows as a failing contact point in Grafana Alerting and as a `refused a webhook call` warning in the plugin's log.
 
 Two caveats. Provisioning writes the settings row but does not run the plugin's first-run backend logic, so after a deploy hit `GET /api/plugins/pushward-alerts-app/resources/healthz` once to spin the backend up. And provisioned settings re-apply on every restart, so the file wins over any later UI edit. Keep the key out of git with `$__env{VAR}` interpolation in `secureJsonData`.
 
