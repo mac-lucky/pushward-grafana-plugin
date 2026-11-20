@@ -1023,7 +1023,7 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert, noRetract map[stri
 // left showing it firing. The caller stopped the acknowledge repeats. The
 // update carries no values: the timeline's series may be keyed by the
 // poller's metric labels, and the webhook's ref-ID keys would prune them as
-// orphans, while left out the merge keeps what the activity shows. A 4xx says
+// orphans, while left out the merge keeps what the activity shows. A 404 says
 // there is no activity to end. With AlsoNotify on and RetractOnResolve off the
 // resolved push goes out too, linked only to an activity that took the end.
 func (b *Bridge) endUntracked(ctx context.Context, logger *slog.Logger, a alert, slug, alertname string) {
@@ -1035,14 +1035,19 @@ func (b *Bridge) endUntracked(ctx context.Context, logger *slog.Logger, a alert,
 	linkSlug := ""
 	err := b.pwClient.UpdateActivity(ctx, slug, pushward.UpdateRequest{State: pushward.StateEnded, Content: content})
 	var he *pushward.HTTPError
+	if errors.As(err, &he) && he.StatusCode == http.StatusUnprocessableEntity {
+		// An activity whose first timeline update never landed has no values,
+		// so a timeline update without them fails; the state alone still ends it.
+		err = b.pwClient.PatchActivity(ctx, slug, pushward.PatchRequest{State: pushward.StateEnded})
+	}
 	switch {
 	case err == nil:
 		linkSlug = slug
 		logger.Info("activity of an untracked alert ended")
 		b.recordPushSent()
 		b.record(alertname, slug, "resolved", true, "")
-	case errors.As(err, &he) && he.StatusCode >= 400 && he.StatusCode < 500 && he.StatusCode != http.StatusTooManyRequests:
-		logger.Info("no activity to end for the untracked alert", "status", he.StatusCode)
+	case errors.As(err, &he) && he.StatusCode == http.StatusNotFound:
+		logger.Info("no activity to end for the untracked alert")
 	default:
 		logger.Error("failed to end activity", "error", err)
 		b.recordError()

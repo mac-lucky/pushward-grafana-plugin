@@ -2,8 +2,11 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/mac-lucky/pushward-integrations/shared/pushward"
@@ -201,5 +204,79 @@ func TestUntrackedResolveAfterRefire(t *testing.T) {
 
 	if got := len(endedPatches(t, m)); got != 2 {
 		t.Errorf("got %d ENDED updates, want one per resolve", got)
+	}
+}
+
+// A refused end: a 422 (an activity whose first timeline update never landed
+// has no values to keep) falls back to a bare ENDED state, and every refusal
+// but a 404 lands in the delivery log as a failure.
+func TestUntrackedResolveRefusedEnd(t *testing.T) {
+	slug := makeSlug("HighCPU")
+	cases := []struct {
+		name                   string
+		contentCode, stateCode int // answers to the ENDED update with content, and to the bare state
+		wantPatches            int
+		wantOK                 bool
+	}{
+		{"no values yet", http.StatusUnprocessableEntity, http.StatusOK, 2, true},
+		{"bare state refused too", http.StatusUnprocessableEntity, http.StatusForbidden, 2, false},
+		{"key rejected", http.StatusUnauthorized, http.StatusOK, 1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				mu      sync.Mutex
+				patches []map[string]any
+				notifs  []map[string]any
+			)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				code := http.StatusOK
+				mu.Lock()
+				switch r.Method {
+				case http.MethodPatch:
+					patches = append(patches, body)
+					code = tc.stateCode
+					if _, ok := body["content"]; ok {
+						code = tc.contentCode
+					}
+				case http.MethodPost:
+					notifs = append(notifs, body)
+				}
+				mu.Unlock()
+				w.WriteHeader(code)
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			t.Cleanup(srv.Close)
+			b := newTestBridge(t, srv.URL, nil, Config{AlsoNotify: true, SeverityLabel: "severity", DefaultSeverity: "warning"})
+			dl := &recLog{}
+			b.deliveryLog = dl
+
+			b.handleResolved(context.Background(), resolvedAlert(), nil)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(patches) != tc.wantPatches {
+				t.Fatalf("got %d PATCH requests, want %d", len(patches), tc.wantPatches)
+			}
+			if last := patches[len(patches)-1]; last["state"] != pushward.StateEnded {
+				t.Errorf("last PATCH %v, want state ENDED", last)
+			}
+			e := dl.find("resolved")
+			if e == nil || e.ok != tc.wantOK {
+				t.Fatalf("delivery log entry %+v, want ok=%v", e, tc.wantOK)
+			}
+			if len(notifs) != 1 {
+				t.Fatalf("got %d notifications, want the resolved push", len(notifs))
+			}
+			wantLink := ""
+			if tc.wantOK {
+				wantLink = slug
+			}
+			if s, _ := notifs[0]["activity_slug"].(string); s != wantLink {
+				t.Errorf("push activity_slug = %q, want %q", s, wantLink)
+			}
+		})
 	}
 }
