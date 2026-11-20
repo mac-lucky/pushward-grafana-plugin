@@ -94,6 +94,7 @@ func newTestBridge(t *testing.T, url string, resolver GrafanaResolver, cfg Confi
 		active:        make(map[string]*alertState),
 		ended:         make(map[string]time.Time),
 		retracts:      make(chan retractJob, retractQueueCap),
+		webhookSlots:  make(chan struct{}, maxConcurrentWebhooks),
 		capDrops:      syncx.NewDropCounter(100),
 		cfg:           cfg,
 	}

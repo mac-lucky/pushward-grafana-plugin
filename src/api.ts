@@ -217,6 +217,8 @@ export function sendTest(kind: TestKind): Promise<TestResponse> {
 // alerts back into this plugin's /resources/webhook endpoint.
 // ---------------------------------------------------------------------------
 
+// The backend takes webhooks only from this account's login (webhookSAName in
+// pkg/plugin/resources.go), so renaming it here stops delivery.
 const WEBHOOK_SA_NAME = 'pushward-alerts-webhook';
 // Every webhook token is named with this prefix so old ones can be cleaned up.
 const WEBHOOK_SA_TOKEN_PREFIX = `${WEBHOOK_SA_NAME}-`;

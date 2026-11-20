@@ -160,7 +160,7 @@ function Overview() {
           <div className={s.sectionBody}>
             {state.status === 'loading' && <LoadingPlaceholder text="Checking status…" />}
             {state.status === 'error' && (
-              <Alert severity="error" title="Could not reach the plugin backend">
+              <Alert severity="error" title="Could not load the plugin status">
                 {state.error}
               </Alert>
             )}

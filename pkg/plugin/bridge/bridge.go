@@ -68,6 +68,12 @@ const (
 	// webhook so they can be interrupted rather than blocking indefinitely.
 	webhookTimeout = 30 * time.Second
 
+	// At most maxConcurrentWebhooks webhooks are processed at once. A webhook
+	// waits up to webhookSlotWait for a slot, so a burst of alert groups
+	// queues for a moment, then gets ErrBusy and Grafana sends it again.
+	maxConcurrentWebhooks = 16
+	webhookSlotWait       = 5 * time.Second
+
 	// alertCheckInterval bounds how often the alertmanager backstop runs. It is
 	// a safety net behind the webhook self-loop, so it stays conservative to
 	// avoid hammering the alertmanager API even with many active alerts.
@@ -211,6 +217,8 @@ type Bridge struct {
 	// again. At most activeAlertCap; the oldest goes first.
 	ended    map[string]time.Time
 	retracts chan retractJob // see queueRetract
+	// webhookSlots bounds the webhooks processed at once (see ProcessWebhook).
+	webhookSlots chan struct{}
 	// retracting is the collapse id of the queued retract being made, and
 	// cancelRetract stops it: a firing alert pushed under that id calls it
 	// first.
@@ -286,6 +294,10 @@ type retractJob struct {
 // errFiredAgain stops a queued retract whose alert fired again.
 var errFiredAgain = errors.New("the alert fired again")
 
+// ErrBusy is ProcessWebhook finding no free slot in time: the webhook was not
+// processed and should be answered with a status Grafana retries.
+var ErrBusy = errors.New("too many webhooks in flight")
+
 // NewBridge constructs the bridge and starts its background sweeper,
 // alertmanager backstop and retract queue. Call Stop to tear them down. p is the per-alert poller
 // (constructed by the caller with the same metrics querier); gr may be nil to
@@ -320,6 +332,7 @@ func NewBridge(
 		active:        make(map[string]*alertState),
 		ended:         make(map[string]time.Time),
 		retracts:      make(chan retractJob, retractQueueCap),
+		webhookSlots:  make(chan struct{}, maxConcurrentWebhooks),
 		capDrops:      syncx.NewDropCounter(100),
 	}
 	if p != nil {
@@ -401,20 +414,28 @@ type alert struct {
 // firing/resolved alerts asynchronously. It returns quickly: parse errors are
 // returned for logging (the resource handler still answers 200 so Grafana does
 // not retry), and valid payloads are handed to a background goroutine bounded by
-// webhookTimeout.
-func (b *Bridge) ProcessWebhook(_ context.Context, rawJSON []byte) error {
+// webhookTimeout. When maxConcurrentWebhooks are already running and none ends
+// within webhookSlotWait (or ctx ends first), it returns ErrBusy instead.
+func (b *Bridge) ProcessWebhook(ctx context.Context, rawJSON []byte) error {
 	var payload webhookPayload
 	if err := json.Unmarshal(rawJSON, &payload); err != nil {
 		return err
+	}
+
+	// Added before the wait, so Stop also waits for a webhook still queued.
+	b.wg.Add(1)
+	if !b.takeWebhookSlot(ctx) {
+		b.wg.Done()
+		return ErrBusy
 	}
 
 	if b.metrics != nil {
 		b.metrics.IncAlertsReceived(len(payload.Alerts))
 	}
 
-	b.wg.Add(1)
 	go func() { // #nosec G118 -- the request context ends when the handler answers 200; webhookTimeout bounds this work and b.wg waits for it
 		defer b.wg.Done()
+		defer func() { <-b.webhookSlots }()
 		// Use a bounded background context so slow Prometheus/PushWard calls can
 		// still be interrupted on shutdown rather than blocking indefinitely.
 		ctx, cancel := context.WithTimeout(context.Background(), webhookTimeout)
@@ -438,6 +459,25 @@ func (b *Bridge) ProcessWebhook(_ context.Context, rawJSON []byte) error {
 		}
 	}()
 	return nil
+}
+
+// takeWebhookSlot takes one of the webhookSlots, waiting up to
+// webhookSlotWait, or until ctx ends, for one to free up.
+func (b *Bridge) takeWebhookSlot(ctx context.Context) bool {
+	select {
+	case b.webhookSlots <- struct{}{}:
+		return true
+	default:
+	}
+	wait := time.NewTimer(webhookSlotWait)
+	defer wait.Stop()
+	select {
+	case b.webhookSlots <- struct{}{}:
+		return true
+	case <-wait.C:
+	case <-ctx.Done():
+	}
+	return false
 }
 
 // payloadPriorities maps the key of each firing alert in one webhook to the

@@ -108,13 +108,23 @@ func callResource(t *testing.T, app *App, method, path string) *backend.CallReso
 	return callResourceBody(t, app, method, path, nil)
 }
 
+// testAdmin is the org Admin the resource tests call as, unless they pick a
+// caller with callResourceAs.
+var testAdmin = &backend.User{Login: "admin", Role: "Admin"}
+
 func callResourceBody(t *testing.T, app *App, method, path string, body []byte) *backend.CallResourceResponse {
 	t.Helper()
+	return callResourceAs(t, context.Background(), app, testAdmin, method, path, body)
+}
+
+func callResourceAs(t *testing.T, ctx context.Context, app *App, user *backend.User, method, path string, body []byte) *backend.CallResourceResponse {
+	t.Helper()
 	var r mockCallResourceResponseSender
-	if err := app.CallResource(context.Background(), &backend.CallResourceRequest{
-		Method: method,
-		Path:   path,
-		Body:   body,
+	if err := app.CallResource(ctx, &backend.CallResourceRequest{
+		PluginContext: backend.PluginContext{OrgID: 1, User: user}, //nolint:staticcheck // what Grafana 12 fills
+		Method:        method,
+		Path:          path,
+		Body:          body,
 	}, &r); err != nil {
 		t.Fatalf("CallResource %s %s: %s", method, path, err)
 	}

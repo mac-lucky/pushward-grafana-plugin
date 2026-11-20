@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/mac-lucky/pushward-integrations/shared/pushward"
 
 	"github.com/mac-lucky/pushward-grafana-plugin/pkg/plugin/bridge"
@@ -28,19 +30,79 @@ var (
 	errNoGrafanaToken        = errors.New("no Grafana service-account token for datasource history: run the Connect wizard (or enable the externalServiceAccounts feature toggle)")
 )
 
+// webhookSAName is the service account the Connect wizard creates for the
+// contact point (WEBHOOK_SA_NAME in src/api.ts).
+const webhookSAName = "pushward-alerts-webhook"
+
+// access says who may call a resource route.
+type access int
+
+const (
+	accessEditor  access = iota // an org Editor or Admin
+	accessAdmin                 // an org Admin
+	accessWebhook               // the webhook service account
+)
+
 // registerRoutes wires the plugin's resource endpoints. Paths are relative to
-// /api/plugins/pushward-alerts-app/resources.
+// /api/plugins/pushward-alerts-app/resources. Each route names who may call
+// it, checked on the handler the mux picked, so no spelling of a path can
+// reach a handler past its check.
 func (a *App) registerRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/healthz", a.handleHealthz)
-	mux.HandleFunc("/config", a.handleConfig)
-	mux.HandleFunc("/test", a.handleTest)
-	mux.HandleFunc("/webhook", a.handleWebhook)
-	mux.HandleFunc("/activities", a.handleActivities)
-	mux.HandleFunc("/activities/end", a.handleEndActivity)
-	mux.HandleFunc("/active", a.handleActive)
-	mux.HandleFunc("/widgets", a.handleWidgets)
-	mux.HandleFunc("/history", a.handleHistory)
-	mux.HandleFunc("/stats", a.handleStats)
+	route := func(path string, need access, h http.HandlerFunc) {
+		mux.HandleFunc(path, a.authorize(need, h))
+	}
+	route("/healthz", accessEditor, a.handleHealthz)
+	route("/config", accessEditor, a.handleConfig)
+	route("/test", accessAdmin, a.handleTest)
+	route("/webhook", accessWebhook, a.handleWebhook)
+	route("/activities", accessEditor, a.handleActivities)
+	route("/activities/end", accessAdmin, a.handleEndActivity)
+	route("/active", accessEditor, a.handleActive)
+	route("/widgets", accessEditor, a.handleWidgets)
+	route("/history", accessEditor, a.handleHistory)
+	route("/stats", accessEditor, a.handleStats)
+}
+
+// authorize answers 403 unless the Grafana caller of the request has need.
+func (a *App) authorize(need access, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if msg := a.denied(backend.PluginConfigFromContext(r.Context()), need); msg != "" {
+			writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "message": msg})
+			return
+		}
+		h(w, r)
+	}
+}
+
+// denied returns why the caller in pc may not call a route needing need, or
+// "" when it may. Grafana passes only the org role: a Grafana server admin who
+// is not an Admin of the org counts by that org role. Anonymous access has no
+// login and is refused everywhere.
+func (a *App) denied(pc backend.PluginContext, need access) string {
+	u := pc.User
+	if u == nil || u.Login == "" {
+		return "Sign in to Grafana to use PushWard."
+	}
+	switch need {
+	case accessWebhook:
+		// Grafana 11 and later name every service account sa-<org id>-<name>
+		// (a migration renamed the older sa-<name> ones), and a login is
+		// unique, so once the account exists no user can take its login.
+		// Without the Connect wizard's token there may be no such account.
+		// OrgID over Namespace: Grafana 12 fills OrgID from the caller.
+		if a.settings.WebhookToken == "" || u.Login != fmt.Sprintf("sa-%d-%s", pc.OrgID, webhookSAName) { //nolint:staticcheck
+			return "Only the PushWard contact point may post alerts here. Run the Connect wizard to set it up."
+		}
+	case accessAdmin:
+		if u.Role != "Admin" {
+			return "This needs the Admin role in this Grafana organization."
+		}
+	default:
+		if u.Role != "Admin" && u.Role != "Editor" {
+			return "PushWard needs the Editor role or higher in this Grafana organization."
+		}
+	}
+	return ""
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -319,7 +381,8 @@ func (a *App) sendTestTimeline(ctx context.Context) error {
 
 // handleWebhook is the embedded-bridge entry point (the self-loop target). It
 // answers 200 immediately so Grafana's alerting engine never retries, and hands
-// the payload to the bridge for async processing.
+// the payload to the bridge for async processing. Only when the bridge has no
+// free slot does it answer 503, which Grafana sends again later.
 func (a *App) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"status": "method not allowed"})
@@ -330,7 +393,12 @@ func (a *App) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"status": "bad request"})
 		return
 	}
-	if perr := a.bridge.ProcessWebhook(r.Context(), body); perr != nil {
+	switch perr := a.bridge.ProcessWebhook(r.Context(), body); {
+	case errors.Is(perr, bridge.ErrBusy):
+		slog.Warn("too many grafana webhooks in flight, answering 503 for Grafana to send it again")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "busy"})
+		return
+	case perr != nil:
 		// Malformed payload: log and still 200 so the alerting engine doesn't
 		// retry an un-parseable body forever.
 		slog.Warn("invalid grafana webhook payload", "error", perr)
