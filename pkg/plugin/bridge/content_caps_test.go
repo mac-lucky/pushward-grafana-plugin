@@ -260,3 +260,43 @@ func sameKeys(m map[string]float64, want []string) bool {
 	sort.Strings(want)
 	return reflect.DeepEqual(got, want)
 }
+
+// TestSeriesKeyLongKeysStayApart covers two series whose joined labels share
+// more than the key limit: each keeps its own key, the same on every call,
+// within the limit. A key that fits is unchanged.
+func TestSeriesKeyLongKeysStayApart(t *testing.T) {
+	p0 := map[string]string{"namespace": "monitoring", "pod": "prometheus-0"}
+	p1 := map[string]string{"namespace": "monitoring", "pod": "prometheus-1"}
+	k0, k1 := SeriesKey(p0, ""), SeriesKey(p1, "")
+	if k0 == k1 {
+		t.Fatalf("both series keyed %q", k0)
+	}
+	for _, k := range []string{k0, k1} {
+		if n := utf8.RuneCountInString(k); n != maxSeriesKeyRunes {
+			t.Errorf("key %q has %d runes, want %d", k, n, maxSeriesKeyRunes)
+		}
+		if !strings.HasPrefix(k, "namespace=monitoring, pod=") {
+			t.Errorf("key %q lost its readable prefix", k)
+		}
+	}
+	if again := SeriesKey(map[string]string{"pod": "prometheus-0", "namespace": "monitoring"}, ""); again != k0 {
+		t.Errorf("same labels keyed %q, then %q", k0, again)
+	}
+	long := strings.Repeat("v", maxSeriesKeyRunes+1)
+	if a, b := SeriesKey(map[string]string{"x": long + "a"}, ""), SeriesKey(map[string]string{"x": long + "b"}, ""); a == b {
+		t.Errorf("single-label keys collide: %q", a)
+	}
+	if a, b := SeriesKey(map[string]string{"x": long + "a", "y": "1"}, "x"), SeriesKey(map[string]string{"x": long + "b", "y": "1"}, "x"); a == b {
+		t.Errorf("preferred-label keys collide: %q", a)
+	}
+	for _, labels := range []map[string]string{
+		{"instance": "node-1"},
+		{"job": "api", "instance": "node-1"},
+		{"k": strings.Repeat("é", maxSeriesKeyRunes-2)},
+	} {
+		got := SeriesKey(labels, "")
+		if strings.Contains(got, "…") {
+			t.Errorf("SeriesKey(%v) = %q, want a key that fits left as it is", labels, got)
+		}
+	}
+}

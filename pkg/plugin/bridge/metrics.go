@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mac-lucky/pushward-integrations/shared/pushward"
+	"github.com/mac-lucky/pushward-integrations/shared/text"
 )
 
 // LabeledSeries is a single time-series result with its metric labels.
@@ -33,7 +34,9 @@ type LabeledPoint struct {
 // If preferLabel is set and present, use its value.
 // If only one label exists, use its value.
 // Otherwise join all as "k=v, k=v" sorted by key.
-// The result is truncated to 32 runes to satisfy the server's key length limit.
+// A key longer than the server's 32-rune limit keeps its first runes and ends
+// in an ellipsis plus a short hash of the whole key, so two long keys that
+// share a prefix stay two series, each the same from tick to tick.
 func SeriesKey(labels map[string]string, preferLabel string) string {
 	var key string
 	switch {
@@ -60,7 +63,8 @@ func SeriesKey(labels map[string]string, preferLabel string) string {
 	}
 
 	if utf8.RuneCountInString(key) > maxSeriesKeyRunes {
-		key = string([]rune(key)[:maxSeriesKeyRunes-1]) + "…"
+		hash := text.HashHex(key, 2) // 4 hex runes
+		key = string([]rune(key)[:maxSeriesKeyRunes-1-len(hash)]) + "…" + hash
 	}
 	return key
 }
