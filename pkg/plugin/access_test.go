@@ -13,8 +13,9 @@ import (
 )
 
 // Who may call each resource route: the webhook only the Connect wizard's
-// service account, the test push and End only an org Admin, the rest an
-// Editor or Admin. Nobody without a login (anonymous access) gets anywhere.
+// service account, the test push and End only an org Admin, the status
+// routes anyone signed in, the rest an Editor or Admin. Nobody without a
+// login (anonymous access) gets anywhere.
 func TestResourceAccess(t *testing.T) {
 	var (
 		anonymous = &backend.User{Role: "Viewer"} // Grafana's anonymous user has no login
@@ -47,12 +48,24 @@ func TestResourceAccess(t *testing.T) {
 		{http.MethodPost, "test", `{"kind":"notification"}`, map[string]bool{"admin": true}},
 		{http.MethodPost, "activities/end", `{}`, map[string]bool{"admin": true}},
 	}
-	for _, path := range []string{"healthz", "config", "activities", "active", "widgets", "history", "stats"} {
+	for _, path := range []string{"activities", "active", "widgets", "history"} {
 		routes = append(routes, struct {
 			method, path string
 			body         string
 			allowed      map[string]bool
 		}{http.MethodGet, path, "", map[string]bool{"editor": true, "admin": true}})
+	}
+	// No secret in these: the Overview and Connect pages a Viewer opens.
+	signedIn := map[string]bool{}
+	for _, c := range callers {
+		signedIn[c.name] = c.user != nil && c.user.Login != ""
+	}
+	for _, path := range []string{"healthz", "config", "stats"} {
+		routes = append(routes, struct {
+			method, path string
+			body         string
+			allowed      map[string]bool
+		}{http.MethodGet, path, "", signedIn})
 	}
 
 	app, _, _ := newTestAppWith(t, map[string]string{"webhookToken": "glsa_test"}, nil)
@@ -96,7 +109,41 @@ func TestWebhookNeedsConnect(t *testing.T) {
 	}
 }
 
-// A webhook that finds every slot taken is answered 503, so Grafana sends it
+// jsonData.webhookLogins lets an org Admin name the service account of a
+// contact point set up by hand; it is taken with or without the Connect
+// wizard's token, and nobody else is.
+func TestWebhookLogins(t *testing.T) {
+	handMade := &backend.User{Login: "sa-1-my-contact-point", Role: "Viewer"}
+	other := &backend.User{Login: "sa-1-someone-else", Role: "Viewer"}
+	connectSA := &backend.User{Login: "sa-1-pushward-alerts-webhook", Role: "Viewer"}
+	for _, secure := range []map[string]string{nil, {"webhookToken": "glsa_test"}} {
+		inst, err := NewApp(context.Background(), backend.AppInstanceSettings{
+			JSONData:                json.RawMessage(`{"webhookLogins":[" sa-1-my-contact-point ",""]}`),
+			DecryptedSecureJSONData: secure,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		app := inst.(*App)
+		t.Cleanup(app.Dispose)
+		for _, c := range []struct {
+			user    *backend.User
+			allowed bool
+		}{{handMade, true}, {other, false}, {connectSA, secure != nil}} {
+			resp := callResourceAs(t, context.Background(), app, c.user, http.MethodPost, "webhook", []byte(`{"alerts":[]}`))
+			if denied := resp.Status == http.StatusForbidden; denied == c.allowed {
+				t.Errorf("webhook as %s with token=%v = %d, want allowed=%v", c.user.Login, secure != nil, resp.Status, c.allowed)
+			}
+		}
+	}
+	// A value that is not a list drops only this setting.
+	s, err := LoadSettings(backend.AppInstanceSettings{JSONData: json.RawMessage(`{"webhookLogins":"sa-1-x","priority":7}`)})
+	if err != nil || len(s.WebhookLogins) != 0 || s.Priority != 7 {
+		t.Errorf("LoadSettings with a bad webhookLogins = (%+v, %v), want the rest loaded", s, err)
+	}
+}
+
+// A webhook that finds the queue full is answered 503, so Grafana sends it
 // again instead of taking a 200 for an alert nobody processed.
 func TestWebhookBusyAnswers503(t *testing.T) {
 	release := make(chan struct{})
@@ -122,20 +169,19 @@ func TestWebhookBusyAnswers503(t *testing.T) {
 	payload := func(i int) []byte {
 		return fmt.Appendf(nil, `{"alerts":[{"status":"firing","fingerprint":"fp","labels":{"alertname":"Alert%d"}}]}`, i)
 	}
-	// Each alert name waits on its own create, holding its slot.
+	// 16 webhooks run, each waiting on its own create, and 256 more queue.
+	const taken = 16 + 256
 	i := 0
 	for ; ; i++ {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel() // give up at once when no slot is free
-		resp := callResourceAs(t, ctx, app, webhookSA, http.MethodPost, "webhook", payload(i))
+		resp := callResourceAs(t, context.Background(), app, webhookSA, http.MethodPost, "webhook", payload(i))
 		if resp.Status == http.StatusServiceUnavailable {
 			break
 		}
-		if resp.Status != http.StatusOK || i > 100 {
-			t.Fatalf("webhook %d = %d %s, want 200 until the slots run out", i, resp.Status, resp.Body)
+		if resp.Status != http.StatusOK || i > taken {
+			t.Fatalf("webhook %d = %d %s, want 200 until the queue is full", i, resp.Status, resp.Body)
 		}
 	}
-	if i != 16 { // bridge.maxConcurrentWebhooks
-		t.Errorf("%d webhooks taken before the 503, want 16", i)
+	if i != taken {
+		t.Errorf("%d webhooks taken before the 503, want %d", i, taken)
 	}
 }

@@ -68,11 +68,12 @@ const (
 	// webhook so they can be interrupted rather than blocking indefinitely.
 	webhookTimeout = 30 * time.Second
 
-	// At most maxConcurrentWebhooks webhooks are processed at once. A webhook
-	// waits up to webhookSlotWait for a slot, so a burst of alert groups
-	// queues for a moment, then gets ErrBusy and Grafana sends it again.
+	// At most maxConcurrentWebhooks webhooks are processed at once, and up to
+	// webhookQueueCap more wait for a slot, so a burst of alert groups (a
+	// Grafana restart, a datasource outage) is worked off in turn. Only a
+	// webhook past both gets ErrBusy, and Grafana sends it again.
 	maxConcurrentWebhooks = 16
-	webhookSlotWait       = 5 * time.Second
+	webhookQueueCap       = 256
 
 	// alertCheckInterval bounds how often the alertmanager backstop runs. It is
 	// a safety net behind the webhook self-loop, so it stays conservative to
@@ -234,8 +235,10 @@ type Bridge struct {
 	// does the stale sweep. At most activeAlertCap; the oldest goes first.
 	pushedNoActivity map[string]time.Time
 	retracts         chan retractJob // see queueRetract
-	// webhookSlots bounds the webhooks processed at once (see ProcessWebhook).
+	// webhookSlots bounds the webhooks processed at once and webhookQueue
+	// those taken, running or waiting (see ProcessWebhook).
 	webhookSlots chan struct{}
+	webhookQueue chan struct{}
 	// retracting is the collapse id of the queued retract being made, and
 	// cancelRetract stops it: a firing alert pushed under that id calls it
 	// first.
@@ -311,9 +314,9 @@ type retractJob struct {
 // errFiredAgain stops a queued retract whose alert fired again.
 var errFiredAgain = errors.New("the alert fired again")
 
-// ErrBusy is ProcessWebhook finding no free slot in time: the webhook was not
+// ErrBusy is ProcessWebhook finding the queue full: the webhook was not
 // processed and should be answered with a status Grafana retries.
-var ErrBusy = errors.New("too many webhooks in flight")
+var ErrBusy = errors.New("webhook queue full")
 
 // NewBridge constructs the bridge and starts its background sweeper,
 // alertmanager backstop and retract queue. Call Stop to tear them down. p is the per-alert poller
@@ -352,6 +355,7 @@ func NewBridge(
 		pushedNoActivity: make(map[string]time.Time),
 		retracts:         make(chan retractJob, retractQueueCap),
 		webhookSlots:     make(chan struct{}, maxConcurrentWebhooks),
+		webhookQueue:     make(chan struct{}, maxConcurrentWebhooks+webhookQueueCap),
 		capDrops:         syncx.NewDropCounter(100),
 	}
 	if p != nil {
@@ -430,23 +434,23 @@ type alert struct {
 }
 
 // ProcessWebhook parses a Grafana alerting webhook payload and processes its
-// firing/resolved alerts asynchronously. It returns quickly: parse errors are
+// firing/resolved alerts asynchronously. It returns at once: parse errors are
 // returned for logging (the resource handler still answers 200 so Grafana does
 // not retry), and valid payloads are handed to a background goroutine bounded by
-// webhookTimeout. When maxConcurrentWebhooks are already running and none ends
-// within webhookSlotWait (or ctx ends first), it returns ErrBusy instead.
-func (b *Bridge) ProcessWebhook(ctx context.Context, rawJSON []byte) error {
+// webhookTimeout once one of the maxConcurrentWebhooks slots is free. When
+// webhookQueueCap more already wait for one, it returns ErrBusy instead.
+func (b *Bridge) ProcessWebhook(_ context.Context, rawJSON []byte) error {
 	var payload webhookPayload
 	if err := json.Unmarshal(rawJSON, &payload); err != nil {
 		return err
 	}
 
-	// Added before the wait, so Stop also waits for a webhook still queued.
-	b.wg.Add(1)
-	if !b.takeWebhookSlot(ctx) {
-		b.wg.Done()
+	select {
+	case b.webhookQueue <- struct{}{}:
+	default:
 		return ErrBusy
 	}
+	b.wg.Add(1) // Stop waits for the queued webhooks too
 
 	if b.metrics != nil {
 		b.metrics.IncAlertsReceived(len(payload.Alerts))
@@ -454,6 +458,8 @@ func (b *Bridge) ProcessWebhook(ctx context.Context, rawJSON []byte) error {
 
 	go func() { // #nosec G118 -- the request context ends when the handler answers 200; webhookTimeout bounds this work and b.wg waits for it
 		defer b.wg.Done()
+		defer func() { <-b.webhookQueue }()
+		b.webhookSlots <- struct{}{}
 		defer func() { <-b.webhookSlots }()
 		// Use a bounded background context so slow Prometheus/PushWard calls can
 		// still be interrupted on shutdown rather than blocking indefinitely.
@@ -478,25 +484,6 @@ func (b *Bridge) ProcessWebhook(ctx context.Context, rawJSON []byte) error {
 		}
 	}()
 	return nil
-}
-
-// takeWebhookSlot takes one of the webhookSlots, waiting up to
-// webhookSlotWait, or until ctx ends, for one to free up.
-func (b *Bridge) takeWebhookSlot(ctx context.Context) bool {
-	select {
-	case b.webhookSlots <- struct{}{}:
-		return true
-	default:
-	}
-	wait := time.NewTimer(webhookSlotWait)
-	defer wait.Stop()
-	select {
-	case b.webhookSlots <- struct{}{}:
-		return true
-	case <-wait.C:
-	case <-ctx.Done():
-	}
-	return false
 }
 
 // payloadPriorities maps the key of each firing alert in one webhook to the

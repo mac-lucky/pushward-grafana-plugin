@@ -60,6 +60,9 @@ export type AppPluginSettings = {
   ackExpireSeconds?: number;
   retractOnResolve?: boolean;
   widgets?: WidgetConfig[];
+  // Extra service-account logins the webhook takes; set by provisioning or the
+  // API, not on this page, which only carries it through a save.
+  webhookLogins?: string[];
 };
 
 const DEFAULTS: Required<AppPluginSettings> = {
@@ -84,6 +87,7 @@ const DEFAULTS: Required<AppPluginSettings> = {
   ackExpireSeconds: 3600,
   retractOnResolve: false,
   widgets: [],
+  webhookLogins: [],
 };
 
 const SCALE_OPTIONS: Array<ComboboxOption<string>> = [
@@ -393,6 +397,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         ackExpireSeconds: state.ackExpireSeconds,
         retractOnResolve: state.retractOnResolve,
         widgets,
+        webhookLogins: jsonData?.webhookLogins,
       },
       secureJsonData: Object.keys(secureJsonData).length > 0 ? secureJsonData : undefined,
     });

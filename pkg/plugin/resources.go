@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -39,6 +40,7 @@ type access int
 
 const (
 	accessEditor  access = iota // an org Editor or Admin
+	accessViewer                // anyone signed in to the org
 	accessAdmin                 // an org Admin
 	accessWebhook               // the webhook service account
 )
@@ -51,8 +53,9 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	route := func(path string, need access, h http.HandlerFunc) {
 		mux.HandleFunc(path, a.authorize(need, h))
 	}
-	route("/healthz", accessEditor, a.handleHealthz)
-	route("/config", accessEditor, a.handleConfig)
+	// Status only, no secret: what the Overview and Connect pages show.
+	route("/healthz", accessViewer, a.handleHealthz)
+	route("/config", accessViewer, a.handleConfig)
 	route("/test", accessAdmin, a.handleTest)
 	route("/webhook", accessWebhook, a.handleWebhook)
 	route("/activities", accessEditor, a.handleActivities)
@@ -60,7 +63,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	route("/active", accessEditor, a.handleActive)
 	route("/widgets", accessEditor, a.handleWidgets)
 	route("/history", accessEditor, a.handleHistory)
-	route("/stats", accessEditor, a.handleStats)
+	route("/stats", accessViewer, a.handleStats)
 }
 
 // authorize answers 403 unless the Grafana caller of the request has need.
@@ -94,12 +97,18 @@ func (a *App) denied(pc backend.PluginContext, need access) string {
 		// unique, so once the account exists no user can take its login.
 		// Without the Connect wizard's token there may be no such account.
 		// OrgID over Namespace: Grafana 12 fills OrgID from the caller.
+		// An org Admin may name more logins in jsonData.webhookLogins, for a
+		// contact point set up by hand with another service account.
+		if slices.Contains(a.settings.WebhookLogins, u.Login) {
+			return ""
+		}
 		if a.settings.WebhookToken == "" {
 			return "PushWard has no webhook token yet. Run the Connect wizard, or provision secureJsonData.webhookToken with the token of the " + webhookSAName + " service account."
 		}
 		if u.Login != fmt.Sprintf("sa-%d-%s", pc.OrgID, webhookSAName) { //nolint:staticcheck
-			return "Only the PushWard contact point may post alerts here, with the token of the " + webhookSAName + " service account. Run the Connect wizard to set it up."
+			return "Only the PushWard contact point may post alerts here, with the token of the " + webhookSAName + " service account, or a login listed in jsonData.webhookLogins. Run the Connect wizard to set it up."
 		}
+	case accessViewer: // a login is all it takes
 	case accessAdmin:
 		if u.Role != "Admin" {
 			return "This needs the Admin role in this Grafana organization."
@@ -388,8 +397,8 @@ func (a *App) sendTestTimeline(ctx context.Context) error {
 
 // handleWebhook is the embedded-bridge entry point (the self-loop target). It
 // answers 200 immediately so Grafana's alerting engine never retries, and hands
-// the payload to the bridge for async processing. Only when the bridge has no
-// free slot does it answer 503, which Grafana sends again later.
+// the payload to the bridge for async processing. Only when the bridge's
+// webhook queue is full does it answer 503, which Grafana sends again later.
 func (a *App) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"status": "method not allowed"})
@@ -402,7 +411,7 @@ func (a *App) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	switch perr := a.bridge.ProcessWebhook(r.Context(), body); {
 	case errors.Is(perr, bridge.ErrBusy):
-		slog.Warn("too many grafana webhooks in flight, answering 503 for Grafana to send it again")
+		slog.Warn("grafana webhook queue full, answering 503 for Grafana to send it again")
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "busy"})
 		return
 	case perr != nil:

@@ -163,6 +163,22 @@ describe('Components/AppConfig', () => {
     );
   });
 
+  test('a save keeps the webhook logins set outside this page', () => {
+    mockFetch.mockReturnValue(NEVER);
+    const plugin = { meta: { ...props.plugin.meta, jsonData: { webhookLogins: ['sa-1-my-contact-point'] } } };
+    // @ts-expect-error - addConfigPage()/setChannelSupport() aren't needed for this test
+    render(<AppConfig plugin={plugin} query={props.query} />);
+
+    fireEvent.submit(screen.getByTestId(testIds.appConfig.container));
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          jsonData: expect.objectContaining({ webhookLogins: ['sa-1-my-contact-point'] }),
+        }),
+      })
+    );
+  });
+
   test('number fields keep whole numbers only', () => {
     const plugin = { meta: { ...props.plugin.meta, jsonData: { alsoNotify: true, ackEnabled: true } } };
     // @ts-expect-error - addConfigPage()/setChannelSupport() aren't needed for this test

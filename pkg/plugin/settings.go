@@ -3,6 +3,7 @@ package plugin
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -121,6 +122,11 @@ type Settings struct {
 	// widget config must not dark the whole plugin.
 	WidgetsError string
 
+	// WebhookLogins are Grafana logins, besides the Connect wizard's service
+	// account, whose calls the webhook takes: for a contact point set up by
+	// hand with another service account's token. Empty by default.
+	WebhookLogins []string
+
 	// Secrets — never echoed by /config or logged.
 	APIKey       string
 	WebhookToken string
@@ -157,6 +163,9 @@ type rawJSONData struct {
 	AckRepeat       *int   `json:"ackRepeatSeconds"`
 	AckExpire       *int   `json:"ackExpireSeconds"`
 	Retract         *bool  `json:"retractOnResolve"`
+	// WebhookLogins is kept raw so a value that is not a list of strings
+	// drops only this setting instead of failing the whole load.
+	WebhookLogins json.RawMessage `json:"webhookLogins"`
 	// Widgets is the raw widget array, parsed + validated by the widgets
 	// package. Kept as RawMessage so a malformed entry yields a precise
 	// per-widget error instead of failing the whole jsonData unmarshal.
@@ -226,6 +235,18 @@ func LoadSettings(s backend.AppInstanceSettings) (*Settings, error) {
 	}
 	if raw.Retract != nil {
 		out.RetractOnResolve = *raw.Retract
+	}
+
+	var logins []string
+	if len(raw.WebhookLogins) > 0 {
+		if err := json.Unmarshal(raw.WebhookLogins, &logins); err != nil {
+			slog.Error("jsonData.webhookLogins is not a list of logins, ignoring it", "error", err)
+		}
+	}
+	for _, l := range logins {
+		if l = strings.TrimSpace(l); l != "" {
+			out.WebhookLogins = append(out.WebhookLogins, l)
+		}
 	}
 
 	// Parse widgets out of band: a malformed entry must not fail the whole
