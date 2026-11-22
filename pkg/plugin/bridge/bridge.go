@@ -231,8 +231,9 @@ type Bridge struct {
 	// pushedNoActivity holds, with when, the keys of alerts whose firing
 	// AlsoNotify push went out without a Live Activity because PushWard
 	// refused to create one. The next webhook still tries the activity; one
-	// that gets it sends no second push. A resolve forgets the key, and so
-	// does the stale sweep. At most activeAlertCap; the oldest goes first.
+	// that gets it sends no second push, and one that fails again renews the
+	// time. A resolve forgets the key, and so does the stale sweep once no
+	// try failed for that long. At most activeAlertCap; the oldest goes first.
 	pushedNoActivity map[string]time.Time
 	retracts         chan retractJob // see queueRetract
 	// webhookSlots bounds the webhooks processed at once and webhookQueue
@@ -603,10 +604,18 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 			int(b.cfg.CleanupDelay.Seconds()), int(b.cfg.StaleTimeout.Seconds()))
 		if err != nil {
 			// Untracked again, so the next webhook tries the activity again.
-			// The push the user asked for goes out now, once for the alert.
+			// The push the user asked for goes out now, once for the alert,
+			// unless a resolve handled while the create was in flight took the
+			// alert already. Each failed try renews the key, so the stale sweep
+			// does not forget it while the alert keeps firing.
 			b.mu.Lock()
+			_, still := b.active[mapKey]
 			delete(b.active, mapKey)
-			push := b.cfg.AlsoNotify && markOnce(b.pushedNoActivity, mapKey)
+			push := false
+			if still && b.cfg.AlsoNotify {
+				push = markOnce(b.pushedNoActivity, mapKey)
+				b.pushedNoActivity[mapKey] = time.Now()
+			}
 			b.mu.Unlock()
 			logger.Error("failed to create activity", "error", err)
 			b.recordError()
@@ -614,9 +623,12 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 			if push {
 				// No deep link: the server knows no activity under slug.
 				b.sendAlertNotification(ctx, logger, a, "", slug, alertname, false, b.ackEnabled())
+				// A later webhook whose create worked forgets the key but
+				// tracks the alert, so either one means it still fires.
 				b.endPushIfGone(ctx, logger, alertname, slug, false, func() bool {
-					_, ok := b.pushedNoActivity[mapKey]
-					return ok
+					_, pushed := b.pushedNoActivity[mapKey]
+					_, tracked := b.active[mapKey]
+					return pushed || tracked
 				})
 			}
 			return
@@ -971,6 +983,7 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert, noRetract map[stri
 	primary := state.primary
 	notifyOnly := state.notifyOnly
 	delete(b.active, mapKey)
+	delete(b.pushedNoActivity, mapKey)
 	if !notifyOnly {
 		markOnce(b.endedSlugs, slug)
 	}

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -1186,5 +1187,129 @@ func TestAlsoNotifyCreateFailure(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// notifications returns the POST /notifications the stub server got, in order.
+func (s *stubServer) notifications() []recordedReq {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []recordedReq
+	for _, r := range s.reqs {
+		if r.method == http.MethodPost && r.path == "/notifications" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// A second webhook for the alert whose create works while the first one's
+// push (sent because its create failed) is still in flight forgets the
+// pushed key, but the alert still fires: that push keeps its repeats and is
+// not taken back.
+func TestAlsoNotifyCreateFailureRetryDuringPush(t *testing.T) {
+	var b *Bridge
+	var creates, sends atomic.Int32
+	s := newStubServerFunc(t, func(path string) int {
+		switch path {
+		case "/activities":
+			if creates.Add(1) == 1 {
+				return http.StatusUnprocessableEntity
+			}
+		case "/notifications":
+			if sends.Add(1) == 1 {
+				other := firingAlert()
+				other.Fingerprint = "fp2"
+				other.Labels = map[string]string{"alertname": "HighCPU", "severity": "critical", "instance": "node-2"}
+				b.handleFiring(context.Background(), other, nil)
+			}
+		}
+		return http.StatusOK
+	})
+	cfg := ackConfig()
+	cfg.RetractOnResolve = true
+	b = newTestBridge(t, s.URL, nil, cfg)
+
+	b.handleFiring(context.Background(), firingAlert(), nil)
+
+	if _, ok := b.active["HighCPU"]; !ok {
+		t.Fatal("the second webhook did not create the activity")
+	}
+	if n := len(s.notifications()); n != 1 {
+		t.Fatalf("%d firing pushes, want 1", n)
+	}
+	if s.find(http.MethodPost, "/notifications/receipts/cancel") != nil {
+		t.Error("the repeats of the only firing push were canceled while the alert fires")
+	}
+	if len(b.retracts) != 0 {
+		t.Error("the only firing push was queued for a retract while the alert fires")
+	}
+	if _, ok := b.ended[alertCollapseID("HighCPU")]; ok {
+		t.Error("the collapse id counts as ended while the alert fires")
+	}
+}
+
+// Creates refused for longer than the stale timeout, with Grafana repeating
+// the webhook, still send one firing push for the alert.
+func TestAlsoNotifyCreateFailureOutlastsStaleSweep(t *testing.T) {
+	s := newStubServerFunc(t, func(path string) int {
+		if path == "/activities" {
+			return http.StatusUnprocessableEntity
+		}
+		return http.StatusOK
+	})
+	b := newTestBridge(t, s.URL, nil, Config{AlsoNotify: true, SeverityLabel: "severity", DefaultSeverity: "warning"})
+	ctx := context.Background()
+
+	b.handleFiring(ctx, firingAlert(), nil)
+	b.pushedNoActivity["HighCPU"] = time.Now().Add(-2 * time.Hour)
+	b.handleFiring(ctx, firingAlert(), nil) // Grafana's repeat, refused again
+	b.sweepStale(ctx, time.Hour)
+	b.handleFiring(ctx, firingAlert(), nil)
+
+	if n := len(s.notifications()); n != 1 {
+		t.Fatalf("%d firing pushes for one alert, want 1", n)
+	}
+}
+
+// A resolve handled while a retried create is in flight ends the episode:
+// the failed retry sends no late firing push, and the next firing sends its
+// own.
+func TestAlsoNotifyCreateFailureResolvedDuringRetry(t *testing.T) {
+	var b *Bridge
+	var creates atomic.Int32
+	s := newStubServerFunc(t, func(path string) int {
+		if path != "/activities" {
+			return http.StatusOK
+		}
+		switch creates.Add(1) {
+		case 1:
+			return http.StatusUnprocessableEntity
+		case 2:
+			b.handleResolved(context.Background(), resolvedAlert(), nil)
+			return http.StatusUnprocessableEntity
+		}
+		return http.StatusOK
+	})
+	b = newTestBridge(t, s.URL, nil, Config{AlsoNotify: true, SeverityLabel: "severity", DefaultSeverity: "warning"})
+	ctx := context.Background()
+
+	b.handleFiring(ctx, firingAlert(), nil) // refused, pushed without an activity
+	b.handleFiring(ctx, firingAlert(), nil) // retry, resolved before it is refused
+	notifs := s.notifications()
+	if len(notifs) != 2 {
+		t.Fatalf("%d pushes after firing, retry and resolve, want firing + resolved", len(notifs))
+	}
+	if body, _ := notifs[1].body["body"].(string); !strings.HasSuffix(body, "CPU back to normal") {
+		t.Errorf("second push body = %q, want the resolved one", body)
+	}
+
+	b.handleFiring(ctx, firingAlert(), nil) // fires again, PushWard healthy
+	notifs = s.notifications()
+	if len(notifs) != 3 {
+		t.Fatalf("%d pushes, want a firing push for the new episode", len(notifs))
+	}
+	if body, _ := notifs[2].body["body"].(string); body != "CPU is high" {
+		t.Errorf("third push body = %q, want the firing one", body)
 	}
 }
