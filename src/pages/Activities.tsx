@@ -61,16 +61,26 @@ const SILENCE_DURATIONS: Array<{ label: string; seconds: number }> = [
   { label: 'Silence 24 hours', seconds: 24 * 60 * 60 },
 ];
 
+// GRAFANA_SLUG is the slug the bridge gives an alert's activity: "grafana-"
+// and 8 hash bytes in hex (makeSlug in pkg/plugin/bridge). Activities of other
+// integrations on the account never match it.
+const GRAFANA_SLUG = /^grafana-[0-9a-f]{16}$/;
+
 // matchersFor builds the alertmanager silence matchers for an activity: the rule
 // UID label silences the whole rule (preferred), then the tracked alertname.
 // fallbackAlertname (the activity's own name, which the bridge sets to the
 // alertname) keeps silencing working after a config-save recreate empties the
-// bridge's in-memory tracking. Returns undefined when nothing can be matched.
-function matchersFor(active: ActiveAlert | undefined, fallbackAlertname?: string): SilenceMatcher[] | undefined {
+// bridge's in-memory tracking, for activities the bridge made. Returns
+// undefined when nothing can be matched.
+function matchersFor(
+  slug: string,
+  active: ActiveAlert | undefined,
+  fallbackAlertname?: string
+): SilenceMatcher[] | undefined {
   if (active?.ruleUid) {
     return [{ name: '__alert_rule_uid__', value: active.ruleUid, isRegex: false, isEqual: true }];
   }
-  const alertname = active?.alertname || fallbackAlertname;
+  const alertname = active?.alertname || (GRAFANA_SLUG.test(slug) ? fallbackAlertname : undefined);
   if (alertname) {
     return [{ name: 'alertname', value: alertname, isRegex: false, isEqual: true }];
   }
@@ -240,7 +250,7 @@ function Activities() {
         cell: ({ row: { original } }) => {
           const slug = original.slug ?? '';
           const busy = busySlug === slug;
-          const matchers = matchersFor(activeBySlug.get(slug), original.name);
+          const matchers = matchersFor(slug, activeBySlug.get(slug), original.name);
           // A preempted activity is still live server-side - the server permits
           // PREEMPTED -> ENDED, the matching alert may still be firing, and
           // ending it also drops it from the promotion pool - so it keeps both
