@@ -242,19 +242,70 @@ func (a *App) startWidgetEngine(querier *dsQuerier) {
 		// residual gap: a gauge/progress widget with no data at startup defers its
 		// create out of Start, so a later persistent failure on that lone widget
 		// is logged rather than reflected in the badge.
-		if err := mgr.Start(ctx); err != nil {
-			if !errors.Is(err, context.Canceled) {
-				slog.Error("widget manager start failed", "error", err)
-				a.setWidgetStatus(false, "widget publishing failed: "+err.Error())
+		//
+		// A failed Start is tried again with a fresh manager (backing off from
+		// widgetRetryMin to widgetRetryMax) unless PushWard refused it for good,
+		// so a PushWard blip at startup does not keep the widgets off until the
+		// next settings save.
+		delay := widgetRetryMin
+		for {
+			err := mgr.Start(ctx)
+			if err == nil {
+				a.setWidgetStatus(true, "")
+				break
 			}
-		} else {
-			a.setWidgetStatus(true, "")
+			// Drain a partly started attempt before the next one publishes.
+			mgr.Wait()
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Error("widget manager start failed", "error", err)
+			if permanentWidgetError(err) {
+				a.setWidgetStatus(false, "widget publishing failed: "+err.Error())
+				return
+			}
+			a.setWidgetStatus(false, fmt.Sprintf("widget publishing failed, trying again in %s: %s", delay, err))
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(delay):
+			}
+			delay = min(2*delay, widgetRetryMax)
+			if mgr, err = sharedwidgets.New(a.pw, specs, slog.Default()); err != nil {
+				a.setWidgetStatus(false, "creating widget manager failed: "+err.Error())
+				return
+			}
 		}
 		// Block until every poll goroutine exits (after cancel), so widgetWG.Wait
 		// in Dispose is a true drain.
 		mgr.Wait()
 	}()
 	slog.Info("widget engine started", "widgets", len(a.settings.Widgets))
+}
+
+// The backoff between widget engine starts; vars so a test can shorten it.
+var (
+	widgetRetryMin = 30 * time.Second
+	widgetRetryMax = 10 * time.Minute
+)
+
+// permanentWidgetError reports whether a failed widget engine start would
+// fail the same way again: the key refused (401/403), the account's widget
+// cap, or another 4xx than 408 and 429.
+func permanentWidgetError(err error) bool {
+	// shared/widgets reports the cap without the HTTP error behind it.
+	if strings.Contains(err.Error(), "widget cap reached") {
+		return true
+	}
+	var he *pushward.HTTPError
+	if !errors.As(err, &he) {
+		return false
+	}
+	switch he.StatusCode {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	}
+	return he.StatusCode >= 400 && he.StatusCode < 500
 }
 
 // CallResource refreshes the Grafana connection from the request context, then
