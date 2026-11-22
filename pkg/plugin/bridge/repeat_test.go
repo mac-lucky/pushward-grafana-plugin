@@ -78,14 +78,15 @@ func newPollingBridge(t *testing.T, url string, q MetricsQuerier, resolver Grafa
 		poller.Wait()
 	})
 	b := &Bridge{
-		pwClient:      pw,
-		metricsClient: q,
-		poller:        poller,
-		grafanaClient: resolver,
-		active:        make(map[string]*alertState),
-		endedSlugs:    make(map[string]time.Time),
-		capDrops:      syncx.NewDropCounter(100),
-		cfg:           cfg,
+		pwClient:         pw,
+		metricsClient:    q,
+		poller:           poller,
+		grafanaClient:    resolver,
+		active:           make(map[string]*alertState),
+		endedSlugs:       make(map[string]time.Time),
+		pushedNoActivity: make(map[string]time.Time),
+		capDrops:         syncx.NewDropCounter(100),
+		cfg:              cfg,
 	}
 	poller.SetUpdateCallback(b.recordPollerValues)
 	return b

@@ -222,7 +222,13 @@ type Bridge struct {
 	// push. A firing alert tracked under the slug again forgets it. At most
 	// activeAlertCap; the oldest goes first.
 	endedSlugs map[string]time.Time
-	retracts   chan retractJob // see queueRetract
+	// pushedNoActivity holds, with when, the keys of alerts whose firing
+	// AlsoNotify push went out without a Live Activity because PushWard
+	// refused to create one. The next webhook still tries the activity; one
+	// that gets it sends no second push. A resolve forgets the key, and so
+	// does the stale sweep. At most activeAlertCap; the oldest goes first.
+	pushedNoActivity map[string]time.Time
+	retracts         chan retractJob // see queueRetract
 	// webhookSlots bounds the webhooks processed at once (see ProcessWebhook).
 	webhookSlots chan struct{}
 	// retracting is the collapse id of the queued retract being made, and
@@ -327,20 +333,21 @@ func NewBridge(
 		cfg.DefaultSeverity = "warning"
 	}
 	b := &Bridge{
-		pwClient:      pw,
-		retractClient: rc,
-		metricsClient: mq,
-		grafanaClient: gr,
-		poller:        p,
-		deliveryLog:   dl,
-		metrics:       m,
-		cfg:           cfg,
-		active:        make(map[string]*alertState),
-		ended:         make(map[string]time.Time),
-		endedSlugs:    make(map[string]time.Time),
-		retracts:      make(chan retractJob, retractQueueCap),
-		webhookSlots:  make(chan struct{}, maxConcurrentWebhooks),
-		capDrops:      syncx.NewDropCounter(100),
+		pwClient:         pw,
+		retractClient:    rc,
+		metricsClient:    mq,
+		grafanaClient:    gr,
+		poller:           p,
+		deliveryLog:      dl,
+		metrics:          m,
+		cfg:              cfg,
+		active:           make(map[string]*alertState),
+		ended:            make(map[string]time.Time),
+		endedSlugs:       make(map[string]time.Time),
+		pushedNoActivity: make(map[string]time.Time),
+		retracts:         make(chan retractJob, retractQueueCap),
+		webhookSlots:     make(chan struct{}, maxConcurrentWebhooks),
+		capDrops:         syncx.NewDropCounter(100),
 	}
 	if p != nil {
 		p.SetUpdateCallback(b.recordPollerValues)
@@ -597,18 +604,35 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 		expr, refID = b.storeQuery(mapKey, e, r)
 	}
 
+	// pushed is set when the firing push went out when an earlier create failed.
+	var pushed bool
 	if isNew {
 		err := b.pwClient.CreateActivity(ctx, slug, alertname, priority,
 			int(b.cfg.CleanupDelay.Seconds()), int(b.cfg.StaleTimeout.Seconds()))
 		if err != nil {
+			// Untracked again, so the next webhook tries the activity again.
+			// The push the user asked for goes out now, once for the alert.
 			b.mu.Lock()
 			delete(b.active, mapKey)
+			push := b.cfg.AlsoNotify && markOnce(b.pushedNoActivity, mapKey)
 			b.mu.Unlock()
 			logger.Error("failed to create activity", "error", err)
 			b.recordError()
 			b.record(alertname, slug, "create", false, err.Error())
+			if push {
+				// No deep link: the server knows no activity under slug.
+				b.sendAlertNotification(ctx, logger, a, "", slug, alertname, false, b.ackEnabled())
+				b.endPushIfGone(ctx, logger, alertname, slug, false, func() bool {
+					_, ok := b.pushedNoActivity[mapKey]
+					return ok
+				})
+			}
 			return
 		}
+		b.mu.Lock()
+		_, pushed = b.pushedNoActivity[mapKey]
+		delete(b.pushedNoActivity, mapKey)
+		b.mu.Unlock()
 		logger.Info("activity created")
 		b.recordActivityCreated()
 		b.record(alertname, slug, "created", true, "")
@@ -622,7 +646,7 @@ func (b *Bridge) handleFiring(ctx context.Context, a alert, priorities map[strin
 	// inline would delay - and on a degraded /notifications endpoint could cancel
 	// - the core Live Activity update. Deferring also covers the no-values early
 	// return, so the user is still notified when the alert carries no values yet.
-	if isNew && b.cfg.AlsoNotify {
+	if isNew && b.cfg.AlsoNotify && !pushed {
 		defer func() {
 			b.sendAlertNotification(ctx, logger, a, slug, slug, alertname, false, b.ackEnabled())
 			b.cancelAckIfGone(ctx, logger, mapKey, alertname, slug, false)
@@ -780,12 +804,21 @@ func (b *Bridge) notifyFiring(ctx context.Context, logger *slog.Logger, a alert,
 // pending had nothing to cancel yet. notifyOnly says whether the alert has no
 // Live Activity.
 func (b *Bridge) cancelAckIfGone(ctx context.Context, logger *slog.Logger, mapKey, alertname, slug string, notifyOnly bool) {
+	b.endPushIfGone(ctx, logger, alertname, slug, notifyOnly, func() bool {
+		_, ok := b.active[mapKey]
+		return ok
+	})
+}
+
+// endPushIfGone is cancelAckIfGone with isTracked, called under b.mu, saying
+// whether the alert is still there.
+func (b *Bridge) endPushIfGone(ctx context.Context, logger *slog.Logger, alertname, slug string, notifyOnly bool, isTracked func() bool) {
 	ack, retract := b.ackFor(notifyOnly), b.retractFor(notifyOnly)
 	if !ack && !retract {
 		return
 	}
 	b.mu.Lock()
-	_, tracked := b.active[mapKey]
+	tracked := isTracked()
 	if !tracked && retract {
 		b.endedOnce(alertCollapseID(alertname))
 	}
@@ -916,6 +949,7 @@ func (b *Bridge) handleResolved(ctx context.Context, a alert, noRetract map[stri
 		notifyOnly := !b.wantsActivity(a)
 		retract := b.retractFor(notifyOnly) && !noRetract[id] && b.endedOnce(id)
 		end := !notifyOnly && !noRetract[id] && markOnce(b.endedSlugs, slug)
+		delete(b.pushedNoActivity, mapKey)
 		b.mu.Unlock()
 		b.cancelAck(ctx, logger, alertname, slug, b.ackFor(notifyOnly))
 		if retract {
@@ -1861,6 +1895,11 @@ func (b *Bridge) sweepStale(ctx context.Context, maxAge time.Duration) {
 			if b.retractFor(state.notifyOnly) && b.endedOnce(alertCollapseID(state.alertname)) {
 				retract = append(retract, *state)
 			}
+		}
+	}
+	for key, at := range b.pushedNoActivity {
+		if now.Sub(at) > maxAge {
+			delete(b.pushedNoActivity, key)
 		}
 	}
 	b.mu.Unlock()

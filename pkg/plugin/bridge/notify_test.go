@@ -87,17 +87,18 @@ func newTestBridge(t *testing.T, url string, resolver GrafanaResolver, cfg Confi
 		poller.Wait()
 	})
 	return &Bridge{
-		pwClient:      pw,
-		retractClient: pushward.NewClient(url, "hlk_x", pushward.WithRetryBudget(time.Nanosecond)),
-		poller:        poller,
-		grafanaClient: resolver,
-		active:        make(map[string]*alertState),
-		ended:         make(map[string]time.Time),
-		endedSlugs:    make(map[string]time.Time),
-		retracts:      make(chan retractJob, retractQueueCap),
-		webhookSlots:  make(chan struct{}, maxConcurrentWebhooks),
-		capDrops:      syncx.NewDropCounter(100),
-		cfg:           cfg,
+		pwClient:         pw,
+		retractClient:    pushward.NewClient(url, "hlk_x", pushward.WithRetryBudget(time.Nanosecond)),
+		poller:           poller,
+		grafanaClient:    resolver,
+		active:           make(map[string]*alertState),
+		ended:            make(map[string]time.Time),
+		endedSlugs:       make(map[string]time.Time),
+		pushedNoActivity: make(map[string]time.Time),
+		retracts:         make(chan retractJob, retractQueueCap),
+		webhookSlots:     make(chan struct{}, maxConcurrentWebhooks),
+		capDrops:         syncx.NewDropCounter(100),
+		cfg:              cfg,
 	}
 }
 
@@ -1128,4 +1129,56 @@ func TestOrgKeySendsContentFreeAlert(t *testing.T) {
 			t.Errorf("delivery log notified = %+v, want ack refused noted", e)
 		}
 	})
+}
+
+// A create PushWard refuses still sends the AlsoNotify push, without a deep
+// link to the activity that does not exist. The next webhook gets the
+// activity and sends no second push; with AlsoNotify off nothing is pushed.
+func TestAlsoNotifyCreateFailure(t *testing.T) {
+	for _, alsoNotify := range []bool{true, false} {
+		t.Run(fmt.Sprint("alsoNotify=", alsoNotify), func(t *testing.T) {
+			var creates sync.Mutex
+			refused := false
+			s := newStubServerFunc(t, func(path string) int {
+				creates.Lock()
+				defer creates.Unlock()
+				if path == "/activities" && !refused {
+					refused = true
+					return http.StatusUnprocessableEntity // permanent, no retry
+				}
+				return http.StatusOK
+			})
+			b := newTestBridge(t, s.URL, nil, Config{AlsoNotify: alsoNotify, SeverityLabel: "severity", DefaultSeverity: "warning"})
+
+			b.handleFiring(context.Background(), firingAlert(), nil)
+			if _, ok := b.active["HighCPU"]; ok {
+				t.Fatal("alert still tracked after the create failed, the next webhook would not try again")
+			}
+			b.handleFiring(context.Background(), firingAlert(), nil) // Grafana's repeat
+			if _, ok := b.active["HighCPU"]; !ok {
+				t.Fatal("the repeat did not create the activity")
+			}
+
+			s.mu.Lock()
+			var notifs []recordedReq
+			for _, r := range s.reqs {
+				if r.method == http.MethodPost && r.path == "/notifications" {
+					notifs = append(notifs, r)
+				}
+			}
+			s.mu.Unlock()
+			want := 0
+			if alsoNotify {
+				want = 1
+			}
+			if len(notifs) != want {
+				t.Fatalf("%d firing pushes, want %d", len(notifs), want)
+			}
+			if want == 1 {
+				if slug, _ := notifs[0].body["activity_slug"].(string); slug != "" {
+					t.Errorf("push links to activity %q that the server refused", slug)
+				}
+			}
+		})
+	}
 }
