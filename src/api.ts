@@ -4,16 +4,19 @@ import { PLUGIN_ID, RESOURCE_BASE_URL } from './constants';
 
 // Normalize an error from a backend call into a human string. getBackendSrv
 // rejects with a fetch-response-like object (not an Error), so unwrap its
-// `data.message`/`statusText` before falling back to String(e) - otherwise the
-// UI would render "[object Object]".
+// `data.message`/`data.error`/`statusText` before falling back to String(e) -
+// otherwise the UI would render "[object Object]".
 export function errorMessage(e: unknown): string {
   if (e instanceof Error) {
     return e.message;
   }
   if (e && typeof e === 'object') {
-    const data = (e as { data?: { message?: string } }).data;
+    const data = (e as { data?: { message?: string; error?: string } }).data;
     if (data?.message) {
       return data.message;
+    }
+    if (data?.error) {
+      return data.error;
     }
     const statusText = (e as { statusText?: string }).statusText;
     if (statusText) {

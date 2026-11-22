@@ -176,3 +176,33 @@ func TestReadEndpointsRejectNonGet(t *testing.T) {
 		}
 	}
 }
+
+// A list PushWard refuses comes back as a 502 with a message the UI shows:
+// a 401 passed through reads to Grafana's frontend as the user's session
+// expiring, and a 403 as the user lacking a role in Grafana.
+func TestListProxyUpstreamErrors(t *testing.T) {
+	for _, tc := range []struct {
+		upstream int
+		want     string
+	}{
+		{http.StatusUnauthorized, "PushWard rejected the API key"},
+		{http.StatusForbidden, "PushWard rejected the API key"},
+		{http.StatusNotFound, "PushWard answered 404: no such list"},
+		{http.StatusServiceUnavailable, "PushWard answered 503: no such list"},
+	} {
+		app := newAppWithStub(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(tc.upstream)
+			_, _ = w.Write([]byte("no such list\n"))
+		})
+		for _, path := range []string{"activities", "widgets"} {
+			resp := callResource(t, app, http.MethodGet, path)
+			var body struct {
+				Message string `json:"message"`
+			}
+			_ = json.Unmarshal(resp.Body, &body)
+			if resp.Status != http.StatusBadGateway || body.Message != tc.want {
+				t.Errorf("%s with PushWard answering %d = %d %q, want 502 %q", path, tc.upstream, resp.Status, body.Message, tc.want)
+			}
+		}
+	}
+}

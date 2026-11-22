@@ -132,7 +132,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // request may proceed.
 func requireGet(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"message": "method not allowed"})
 		return false
 	}
 	return true
@@ -445,7 +445,7 @@ func (a *App) proxyList(w http.ResponseWriter, r *http.Request, upstreamPath, re
 		return
 	}
 	if a.settings.APIKey == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "PushWard API key not set"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "PushWard API key not set"})
 		return
 	}
 
@@ -468,26 +468,33 @@ func (a *App) proxyList(w http.ResponseWriter, r *http.Request, upstreamPath, re
 
 		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u, nil)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
 			return
 		}
 		req.Header.Set("Authorization", "Bearer "+a.settings.APIKey)
 
 		resp, err := a.httpClient.Do(req)
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
 			return
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			writeJSON(w, resp.StatusCode, map[string]any{"error": strings.TrimSpace(string(body))})
+			// 502 whatever PushWard answered: passed through, a 401 reads to
+			// Grafana's frontend as the user's own session expiring, and a 403
+			// as the user lacking a role here.
+			msg := "PushWard rejected the API key"
+			if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
+				msg = fmt.Sprintf("PushWard answered %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]any{"message": msg})
 			return
 		}
 
 		var env listEnvelope
 		if err := json.Unmarshal(body, &env); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "unexpected list response from PushWard"})
+			writeJSON(w, http.StatusBadGateway, map[string]any{"message": "unexpected list response from PushWard"})
 			return
 		}
 		for _, it := range env.Items {

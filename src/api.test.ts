@@ -109,6 +109,10 @@ describe('api', () => {
       expect(errorMessage({ data: { message: 'bad request' } })).toBe('bad request');
     });
 
+    it('reads data.error when there is no data.message', () => {
+      expect(errorMessage({ data: { error: 'upstream detail' }, statusText: 'Bad Gateway' })).toBe('upstream detail');
+    });
+
     it('falls back to statusText', () => {
       expect(errorMessage({ status: 500, statusText: 'Internal Server Error' })).toBe('Internal Server Error');
     });
