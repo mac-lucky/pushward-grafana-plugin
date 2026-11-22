@@ -61,18 +61,13 @@ func NewPoller(q MetricsQuerier, pw *pushward.Client, interval time.Duration) *P
 	}
 }
 
-// Start begins polling for the given slug and PromQL expression.
+// StartWithSeed begins polling for the given slug and PromQL expression.
 // seriesLabel is the preferred metric label to use as series key (can be empty for auto-detect).
 // primary is the series that drives the iOS headline; it is retained when a poll
 // yields more than the server's series limit and capSeries has to trim (empty is fine).
-// No-op if already polling for this slug. Use Start when the firing webhook has
-// already seeded the activity's timeline template/styling.
-func (p *Poller) Start(slug, expr, seriesLabel, primary string) {
-	p.StartWithSeed(slug, expr, seriesLabel, primary, nil)
-}
-
-// StartWithSeed is like Start but, when seed is non-nil, the poller sends a full
-// UpdateActivity establishing the timeline template/styling on its first
+// No-op if already polling for this slug. A nil seed is for a firing webhook
+// that already set the activity's timeline template/styling. A non-nil seed
+// makes the poller send a full UpdateActivity establishing them on its first
 // successful tick (then value-only patches thereafter). Used when the firing
 // webhook had no values to seed with, so the activity would otherwise be left on
 // the generic template while ONGOING. Reports whether it started a poller.

@@ -149,12 +149,10 @@ func capHistory(history map[string][]pushward.HistoryPoint, keep map[string]floa
 type MetricsClient struct {
 	httpClient *http.Client
 	baseURL    string
-	username   string
-	password   string
 	bearer     string
 }
 
-// defaultTimeout is used when WithTimeout is not supplied.
+// defaultTimeout is the HTTP client timeout of a metrics query.
 const defaultTimeout = 30 * time.Second
 
 // maxResponseBytes bounds how much of a metrics response is decoded. A
@@ -163,8 +161,7 @@ const defaultTimeout = 30 * time.Second
 // (a handful of points/series).
 const maxResponseBytes = 16 << 20
 
-// NewMetricsClient creates a new metrics client. Default HTTP timeout is 30s;
-// override with WithTimeout.
+// NewMetricsClient creates a new metrics client with a 30s HTTP timeout.
 func NewMetricsClient(baseURL string, opts ...MetricsOption) *MetricsClient {
 	c := &MetricsClient{
 		httpClient: &http.Client{Timeout: defaultTimeout},
@@ -179,45 +176,10 @@ func NewMetricsClient(baseURL string, opts ...MetricsOption) *MetricsClient {
 // MetricsOption configures the metrics client.
 type MetricsOption func(*MetricsClient)
 
-// WithTimeout sets the HTTP client timeout. Non-positive values are ignored.
-func WithTimeout(d time.Duration) MetricsOption {
-	return func(c *MetricsClient) {
-		if d > 0 {
-			c.httpClient.Timeout = d
-		}
-	}
-}
-
-// WithBasicAuth sets basic authentication credentials.
-func WithBasicAuth(username, password string) MetricsOption {
-	return func(c *MetricsClient) {
-		c.username = username
-		c.password = password
-	}
-}
-
 // WithBearerToken sets a bearer token for authentication. In the plugin this is
 // the IAM service-account token so the datasource proxy authorizes the query.
 func WithBearerToken(token string) MetricsOption {
 	return func(c *MetricsClient) { c.bearer = token }
-}
-
-// QueryRange fetches time-series data for the first result series only.
-func (c *MetricsClient) QueryRange(ctx context.Context, expr string, from, to time.Time, step time.Duration) ([]pushward.HistoryPoint, error) {
-	series, err := c.QueryRangeAll(ctx, expr, from, to, step)
-	if err != nil || len(series) == 0 {
-		return nil, err
-	}
-	return series[0].Points, nil
-}
-
-// QueryInstant fetches a single data point for the first result series only.
-func (c *MetricsClient) QueryInstant(ctx context.Context, expr string, ts time.Time) (*pushward.HistoryPoint, error) {
-	points, err := c.QueryInstantAll(ctx, expr, ts)
-	if err != nil || len(points) == 0 {
-		return nil, err
-	}
-	return &points[0].Point, nil
 }
 
 // QueryRangeAll fetches time-series data for all result series.
@@ -397,8 +359,6 @@ func parseInstantValue(pair []json.RawMessage) (*pushward.HistoryPoint, error) {
 func (c *MetricsClient) setAuth(req *http.Request) {
 	if c.bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+c.bearer)
-	} else if c.username != "" {
-		req.SetBasicAuth(c.username, c.password)
 	}
 }
 

@@ -382,7 +382,7 @@ func (b *Bridge) Stop() {
 			b.stop()
 		}
 		// Drain in-flight webhook goroutines (producers) BEFORE stopping the
-		// pollers (consumers): a webhook still in flight can call poller.Start,
+		// pollers (consumers): a webhook still in flight can start a poller,
 		// and a Start that wins the race after StopAll would insert a cancel
 		// that nothing invokes again, leaving Wait blocked forever.
 		b.wg.Wait()
@@ -854,8 +854,8 @@ func (b *Bridge) storePriority(mapKey string, priority int) {
 // either Start runs first (the poller lands in p.active and the later Stop
 // cancels it) or the entry is already gone (we skip Start). That closes the
 // window where a resolved racing an in-flight firing-create could leave a poller
-// running forever against an already-ended activity. poller.Start/StartWithSeed
-// take only p.mu, never b.mu, so there is no lock-ordering cycle. Returns whether
+// running forever against an already-ended activity. poller.StartWithSeed
+// takes only p.mu, never b.mu, so there is no lock-ordering cycle. Returns whether
 // a poller was started.
 func (b *Bridge) startPollerIfTracked(mapKey, slug, expr, seriesLabel, primary string, seed *pushward.Content) bool {
 	b.mu.Lock()
