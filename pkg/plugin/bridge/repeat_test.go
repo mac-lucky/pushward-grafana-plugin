@@ -25,7 +25,12 @@ func (r ruleResolver) GetRuleQuery(context.Context, string) (string, string, str
 	return r.expr, r.refID, r.datasourceUID, nil
 }
 
-func (ruleResolver) IsAlertFiring(context.Context, string) (bool, error) { return true, nil }
+// HasToken false keeps the backstop away from these alerts.
+func (ruleResolver) HasToken() bool { return false }
+
+func (ruleResolver) FiringAlertNames(context.Context) (map[string]bool, error) {
+	return nil, errors.New("no token")
+}
 
 // recQuerier answers every query with one series labeled instance=n1 and
 // records the expressions it was asked to run.

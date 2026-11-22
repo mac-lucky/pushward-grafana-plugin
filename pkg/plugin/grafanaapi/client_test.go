@@ -77,15 +77,57 @@ func TestGetRuleQueryRefusalIsNotCached(t *testing.T) {
 // The backstop decides that an alert resolved, so it must keep the IAM token
 // even though rule lookups take the Viewer's: swapping the two conns would
 // let a folder-scoped Viewer's empty alert list end a firing activity.
-func TestIsAlertFiringUsesIAMToken(t *testing.T) {
-	c, _ := newRuleClient(t, "viewer-token", func(w http.ResponseWriter, r *http.Request) {
+func TestFiringAlertNamesUsesIAMToken(t *testing.T) {
+	c, hits := newRuleClient(t, "viewer-token", func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer iam-token" {
 			t.Errorf("Authorization = %q, want the IAM token", got)
 		}
-		_, _ = w.Write([]byte(`[{}]`))
+		if r.URL.Path != "/api/alertmanager/grafana/api/v2/alerts" || r.URL.Query().Has("filter") {
+			t.Errorf("request %s, want one unfiltered alert list", r.URL)
+		}
+		_, _ = w.Write([]byte(`[{"labels":{"alertname":"HighCPU","instance":"a"},"status":{"state":"active"}},
+			{"labels":{"alertname":"Quote \" and \\ backslash"}},{"labels":{"alertname":"HighCPU","instance":"b"}}]`))
 	})
-	if firing, err := c.IsAlertFiring(context.Background(), "HighCPU"); err != nil || !firing {
-		t.Errorf("IsAlertFiring = (%v, %v), want (true, nil)", firing, err)
+	names, err := c.FiringAlertNames(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"HighCPU": true, `Quote " and \ backslash`: true}
+	if len(names) != len(want) || !names["HighCPU"] || !names[`Quote " and \ backslash`] {
+		t.Errorf("FiringAlertNames = %v, want %v", names, want)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("%d requests, want 1", n)
+	}
+}
+
+// A list that is cut off or not a list is an error, never fewer alerts.
+func TestFiringAlertNamesRefusesPartialList(t *testing.T) {
+	for _, body := range []string{`[{"labels":{"alertname":"A"}},{"labels":`, `null`, `{}`} {
+		c, _ := newRuleClient(t, "viewer-token", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		})
+		if names, err := c.FiringAlertNames(context.Background()); err == nil {
+			t.Errorf("FiringAlertNames(%s) = %v, want an error", body, names)
+		}
+	}
+}
+
+func TestFiringAlertNamesWithoutIAMTokenSendsNothing(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
+	t.Cleanup(srv.Close)
+	conn := func() (string, string) { return srv.URL, "" }
+	c := NewClient(conn, conn)
+	t.Cleanup(c.Close)
+	if c.HasToken() {
+		t.Error("HasToken with an empty token")
+	}
+	if _, err := c.FiringAlertNames(context.Background()); err == nil {
+		t.Error("FiringAlertNames succeeded without a token")
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("%d requests without a token, want 0", n)
 	}
 }
 

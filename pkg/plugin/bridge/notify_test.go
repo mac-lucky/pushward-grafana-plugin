@@ -914,7 +914,12 @@ func (r resolvingResolver) GetRuleQuery(context.Context, string) (string, string
 	return "", "", "", errors.New("no query")
 }
 
-func (r resolvingResolver) IsAlertFiring(context.Context, string) (bool, error) { return false, nil }
+func (r resolvingResolver) HasToken() bool { return true }
+
+// FiringAlertNames says no alert fires, so the backstop ends every one.
+func (r resolvingResolver) FiringAlertNames(context.Context) (map[string]bool, error) {
+	return map[string]bool{}, nil
+}
 
 func TestAckCanceledWhenResolveOvertakesFiringPush(t *testing.T) {
 	m := newMockServer(t, testutil.MockOptions{})

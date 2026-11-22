@@ -119,7 +119,12 @@ const (
 type GrafanaResolver interface {
 	ExtractRuleUID(generatorURL string) string
 	GetRuleQuery(ctx context.Context, ruleUID string) (expr, refID, datasourceUID string, err error)
-	IsAlertFiring(ctx context.Context, alertname string) (bool, error)
+	// HasToken reports whether FiringAlertNames can ask Grafana at all; the
+	// backstop does nothing while it cannot.
+	HasToken() bool
+	// FiringAlertNames returns the alertname of every alert Grafana holds
+	// active. An error means the list is unknown, never that none fire.
+	FiringAlertNames(ctx context.Context) (map[string]bool, error)
 }
 
 // DeliveryLogger records a delivery outcome for the /history surface. Optional;
@@ -1936,7 +1941,15 @@ func (b *Bridge) startAlertChecker(ctx context.Context, interval time.Duration) 
 	}()
 }
 
+// checkAlertStates ends the tracked alerts the Grafana alertmanager no longer
+// holds active. Without the IAM token it does nothing (fails closed), and a
+// list it could not read skips the whole sweep.
 func (b *Bridge) checkAlertStates(ctx context.Context) {
+	if !b.grafanaClient.HasToken() {
+		return
+	}
+	// Snapshot before the list is read: an alert that fires again after the
+	// snapshot bumps lastSeen, which the end below checks.
 	b.mu.Lock()
 	type entry struct {
 		name  string
@@ -1944,23 +1957,24 @@ func (b *Bridge) checkAlertStates(ctx context.Context) {
 	}
 	entries := make([]entry, 0, len(b.active))
 	for name, state := range b.active {
-		entries = append(entries, entry{name: name, state: *state})
+		// Anonymous alerts are keyed by fingerprint and have no alertname
+		// to look up; the sweeper's staleTimeout reaps them instead.
+		if state.alertname != "" {
+			entries = append(entries, entry{name: name, state: *state})
+		}
 	}
 	b.mu.Unlock()
+	if len(entries) == 0 {
+		return
+	}
+	firingNames, err := b.grafanaClient.FiringAlertNames(ctx)
+	if err != nil {
+		slog.Warn("alert state check failed, skipping this sweep", "error", err)
+		return
+	}
 
 	for _, e := range entries {
-		// Anonymous alerts are keyed by fingerprint and have no alertname to
-		// query the alertmanager filter with; let the sweeper's staleTimeout
-		// reap them instead of mistaking the always-false query for "resolved".
-		if e.state.alertname == "" {
-			continue
-		}
-		firing, err := b.grafanaClient.IsAlertFiring(ctx, e.state.alertname)
-		if err != nil {
-			slog.Warn("alert state check failed", "alertname", e.state.alertname, "error", err)
-			continue
-		}
-		if firing {
+		if firingNames[e.state.alertname] {
 			continue
 		}
 

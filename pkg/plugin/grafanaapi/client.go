@@ -1,6 +1,6 @@
 // Package grafanaapi calls Grafana's own HTTP API from inside the plugin
 // backend. It resolves an alert rule's PromQL expression (ruler API, any token
-// with alert-rule read), checks whether an alert is still firing (alertmanager
+// with alert-rule read), lists the alerts still firing (alertmanager
 // API, the auto-provisioned IAM service-account token only), and builds the
 // datasource-proxy base URL the metrics querier uses for history queries.
 package grafanaapi
@@ -209,23 +209,39 @@ func (c *Client) GetRuleQuery(ctx context.Context, ruleUID string) (expr, refID,
 	return rq.expr, rq.refID, rq.datasourceUID, nil
 }
 
-// IsAlertFiring checks the Grafana alertmanager API to determine if any
-// instances of the given alertname are currently active (firing).
-func (c *Client) IsAlertFiring(ctx context.Context, alertname string) (bool, error) {
-	filter := fmt.Sprintf(`alertname="%s"`, alertname)
+// maxAlertsBytes bounds the alert list FiringAlertNames reads, far above the
+// list of a Grafana with thousands of active alerts.
+const maxAlertsBytes = 16 << 20
+
+// HasToken reports whether there is an IAM service-account token to ask the
+// alertmanager API with. Without one (the externalServiceAccounts toggle off)
+// FiringAlertNames cannot work.
+func (c *Client) HasToken() bool {
+	_, token := c.conn()
+	return strings.TrimSpace(token) != ""
+}
+
+// FiringAlertNames returns the alertname of every alert the Grafana
+// alertmanager holds active, silenced and inhibited ones included: they still
+// fire. One request covers every tracked alert. The list is read one alert at
+// a time keeping only the names, and a list past maxAlertsBytes fails as a
+// whole, so a cut-off list never reads as alerts that resolved.
+func (c *Client) FiringAlertNames(ctx context.Context) (map[string]bool, error) {
 	baseURL, token := c.conn()
-	reqURL := fmt.Sprintf("%s/api/alertmanager/grafana/api/v2/alerts?filter=%s",
-		strings.TrimRight(baseURL, "/"), url.QueryEscape(filter))
+	if strings.TrimSpace(token) == "" {
+		return nil, errors.New("no IAM service-account token for the alertmanager API")
+	}
+	reqURL := strings.TrimRight(baseURL, "/") + "/api/alertmanager/grafana/api/v2/alerts?active=true"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
-		return false, fmt.Errorf("creating request: %w", err)
+		return nil, fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("querying alertmanager: %w", err)
+		return nil, fmt.Errorf("querying alertmanager: %w", err)
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
@@ -233,15 +249,29 @@ func (c *Client) IsAlertFiring(ctx context.Context, alertname string) (bool, err
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("alertmanager API returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("alertmanager API returned %d", resp.StatusCode)
 	}
 
-	var alerts []json.RawMessage
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&alerts); err != nil {
-		return false, fmt.Errorf("decoding alerts: %w", err)
+	dec := json.NewDecoder(io.LimitReader(resp.Body, maxAlertsBytes))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('[') {
+		return nil, fmt.Errorf("decoding alerts: want a list, got %v (%v)", tok, err)
 	}
-
-	return len(alerts) > 0, nil
+	names := make(map[string]bool)
+	for dec.More() {
+		var a struct {
+			Labels struct {
+				Alertname string `json:"alertname"`
+			} `json:"labels"`
+		}
+		if err := dec.Decode(&a); err != nil {
+			return nil, fmt.Errorf("decoding alerts: %w", err)
+		}
+		names[a.Labels.Alertname] = true
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, fmt.Errorf("decoding alerts: %w", err)
+	}
+	return names, nil
 }
 
 // alertRuleResponse is the Grafana ruler API response for one alert rule.
