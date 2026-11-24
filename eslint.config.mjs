@@ -36,4 +36,10 @@ export default defineConfig([
     ],
   },
   ...baseConfig,
+  {
+    // @grafana/eslint-config 10 still sets overrides.arrow, which @stylistic v6 removed (v6 no longer checks arrows here).
+    rules: {
+      '@stylistic/type-annotation-spacing': ['error', { after: true, before: false }],
+    },
+  },
 ]);
