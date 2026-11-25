@@ -44,14 +44,32 @@ func firstFinite(points []bridge.LabeledPoint) (float64, bool) {
 	return v, true
 }
 
+// roundWithin rounds a widget value with bridge.RoundValue, but never past a
+// content bound the reading was within: the server refuses a gauge value
+// outside min_value..max_value, and a bound such as 99.996 has more places
+// than the rounding keeps.
+func roundWithin(v float64, lo, hi *float64) float64 {
+	r := bridge.RoundValue(v, bridge.ValueDecimals)
+	if lo != nil && v >= *lo && r < *lo {
+		return *lo
+	}
+	if hi != nil && v <= *hi && r > *hi {
+		return *hi
+	}
+	return r
+}
+
 // ScalarSource exposes a single scalar value per call from an instant query,
-// rounded with bridge.RoundValue so the widget shows 88.42 and an on_change
-// widget is pushed only when that number changes.
+// rounded with roundWithin so the widget shows 88.42 and an on_change widget is
+// pushed only when that number changes. The shared manager renders the
+// widget's label_template from this same rounded value. Min and Max are the
+// widget's content.min_value and max_value, nil when unset.
 // Returns shared/widgets.ErrNoData when the query has no result so the manager
 // skips the tick rather than treating it as an error.
 type ScalarSource struct {
-	Q    Querier
-	Expr string
+	Q        Querier
+	Expr     string
+	Min, Max *float64
 }
 
 // Value implements shared/widgets.ValueSource.
@@ -64,7 +82,7 @@ func (s *ScalarSource) Value(ctx context.Context) (float64, error) {
 	if !ok {
 		return 0, sharedwidgets.ErrNoData
 	}
-	return bridge.RoundValue(v, bridge.ValueDecimals), nil
+	return roundWithin(v, s.Min, s.Max), nil
 }
 
 // Trend sparkline bounds, mirrored from pushward-server: fewer than 2 or more
@@ -150,8 +168,9 @@ func (s *TrendSource) push(v float64, now time.Time) {
 // MultiSource exposes label-keyed fan-out values for queries returning multiple
 // series (one widget per series), rounded as ScalarSource rounds its value.
 type MultiSource struct {
-	Q    Querier
-	Expr string
+	Q        Querier
+	Expr     string
+	Min, Max *float64
 }
 
 // Values implements shared/widgets.MultiValueSource.
@@ -162,7 +181,7 @@ func (s *MultiSource) Values(ctx context.Context) ([]sharedwidgets.LabeledValue,
 	}
 	out := make([]sharedwidgets.LabeledValue, 0, len(points))
 	for _, p := range points {
-		out = append(out, sharedwidgets.LabeledValue{Labels: p.Labels, Value: bridge.RoundValue(p.Point.Value, bridge.ValueDecimals)})
+		out = append(out, sharedwidgets.LabeledValue{Labels: p.Labels, Value: roundWithin(p.Point.Value, s.Min, s.Max)})
 	}
 	return out, nil
 }
@@ -273,7 +292,8 @@ type statRowData struct {
 
 // reading is a polled value as a row's templates see it: {{.Value}} prints it
 // rounded like every other widget value, in full rather than as 1.234567e+06,
-// while printf, comparisons and clock still get the exact number.
+// and so do printf's string verbs (%v, %s) through String, while printf's
+// number verbs, comparisons and clock still get the exact number.
 type reading float64
 
 func (r reading) String() string {

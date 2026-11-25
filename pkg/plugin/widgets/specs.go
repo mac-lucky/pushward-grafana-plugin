@@ -54,9 +54,9 @@ func BuildSpecs(cfgs []WidgetConfig, q Querier) ([]sharedwidgets.Spec, error) {
 				spec.StatChangeMask = mask
 			}
 		case w.Query != "":
-			spec.Source = &ScalarSource{Q: q, Expr: w.Query}
+			spec.Source = &ScalarSource{Q: q, Expr: w.Query, Min: w.Content.MinValue, Max: w.Content.MaxValue}
 		case w.QueryAll != "":
-			spec.MultiSource = &MultiSource{Q: q, Expr: w.QueryAll}
+			spec.MultiSource = &MultiSource{Q: q, Expr: w.QueryAll, Min: w.Content.MinValue, Max: w.Content.MaxValue}
 		}
 		specs = append(specs, spec)
 	}

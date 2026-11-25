@@ -43,6 +43,36 @@ func TestScalarAndTrendSourcesRound(t *testing.T) {
 	}
 }
 
+// Rounding never carries a reading past a bound it was within: the server
+// refuses a gauge value outside min_value..max_value, so 99.996 under a
+// max_value of 99.996 must not go out as 100. A reading already outside its
+// bounds is only rounded, as before.
+func TestRoundingStaysWithinBounds(t *testing.T) {
+	lo, hi := 10.004, 99.996
+	cases := []struct {
+		name     string
+		in, want float64
+	}{
+		{"at the upper bound", 99.996, 99.996},
+		{"just under the upper bound", 99.9951, 99.996},
+		{"at the lower bound", 10.004, 10.004},
+		{"inside", 50.123456, 50.12},
+		{"above the upper bound", 100.0049, 100},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q := &stubQuerier{byExpr: map[string][]bridge.LabeledPoint{"q": {point(tc.in, map[string]string{"instance": "web-1"})}}}
+			if got, err := (&ScalarSource{Q: q, Expr: "q", Min: &lo, Max: &hi}).Value(context.Background()); err != nil || got != tc.want {
+				t.Errorf("scalar = (%v, %v), want %v", got, err, tc.want)
+			}
+			got, err := (&MultiSource{Q: q, Expr: "q", Min: &lo, Max: &hi}).Values(context.Background())
+			if err != nil || got[0].Value != tc.want {
+				t.Errorf("multi = (%+v, %v), want %v", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestMultiSourceRounds(t *testing.T) {
 	q := &stubQuerier{byExpr: map[string][]bridge.LabeledPoint{"q": {
 		point(88.42464668357734, map[string]string{"instance": "web-1"}),
@@ -79,6 +109,7 @@ func TestStatRowValueRounding(t *testing.T) {
 		{"long float", "cpu", `{{.Value}}`, "88.42"},
 		{"printf keeps the exact number", "cpu", `{{printf "%.3f" .Value}}`, "88.425"},
 		{"printf rounds once", "split", `{{printf "%.0f" .Value}}`, "13"},
+		{"printf %v prints the rounded number", "cpu", `{{printf "%v%%" .Value}}`, "88.42%"},
 		{"large integer in full", "users", `{{.Value}}`, "1234567"},
 		{"very small", "small", `{{.Value}}`, "0.00421"},
 		{"value_by", "split", `{{.Values.five_hour}}%`, "13.5%"},
