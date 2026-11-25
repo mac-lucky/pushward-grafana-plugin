@@ -91,6 +91,8 @@ A saved key that does not parse is never a reason to send the alert in the clear
 
 Each entry in the `widgets` array is one query published as a PushWard Home or Lock Screen widget. A slug, a query and a template is the whole minimum; everything below is optional.
 
+The value is sent with two decimal places, and at least three significant digits so 0.0042 stays 0.0042 rather than 0. `update_mode: on_change` compares those rounded values, so noise past the second decimal no longer pushes the widget on every poll. A `stat_list` row's `{{.Value}}` prints the same rounded number; `printf` gets the exact reading, so `{{printf "%.1f" .Value}}` behaves as it always did.
+
 `trend` draws a sparkline. The plugin keeps the last 48 readings of a widget in memory and sends them alongside the current value, so the chart comes from the poll history rather than a range query. At a 60s interval it fills in 48 minutes. The widget shows up on the second poll, not the first, because two samples is the least the server accepts for a line. Bounds behave differently here than on the other templates: `content.min_value` and `content.max_value` are optional chart limits, and without them the chart auto-scales. Trend needs `query` rather than `query_all` - there is one sample buffer per widget, so a fan-out has nowhere to keep per-series history.
 
 A repeated reading is only recorded once a minute, or once per poll interval if that is longer. Without that, a widget polling every 5s would flush 48 minutes of real history out of the buffer in four and leave you looking at 48 identical dots. A reading that actually moves is always recorded immediately.

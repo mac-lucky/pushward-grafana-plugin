@@ -321,7 +321,8 @@ var ErrBusy = errors.New("webhook queue full")
 
 // NewBridge constructs the bridge and starts its background sweeper,
 // alertmanager backstop and retract queue. Call Stop to tear them down. p is the per-alert poller
-// (constructed by the caller with the same metrics querier); gr may be nil to
+// (constructed by the caller with the same metrics querier; both send its readings as it
+// returns them, so the plugin passes a RoundingQuerier); gr may be nil to
 // disable PromQL auto-extract and the alertmanager backstop; dl and m may be nil.
 // rc makes the retracts a resolve waits on and should not retry (see
 // retractTimeout); the queued ones go through pw, which waits out a 429.
@@ -1214,14 +1215,14 @@ func (b *Bridge) resolveValues(a alert, preferredRefID, seriesLabel string) map[
 	// Single ref ID match — use alertname as key for backward compatibility.
 	if preferredRefID != "" {
 		if v, ok := a.Values[preferredRefID]; ok {
-			return map[string]float64{label: v}
+			return map[string]float64{label: b.roundValue(v)}
 		}
 	}
 
 	// Single value — use alertname as key.
 	if len(a.Values) == 1 {
 		for _, v := range a.Values {
-			return map[string]float64{label: v}
+			return map[string]float64{label: b.roundValue(v)}
 		}
 	}
 
@@ -1230,9 +1231,19 @@ func (b *Bridge) resolveValues(a alert, preferredRefID, seriesLabel string) map[
 	// will replace them with proper metric-derived keys on next tick.
 	result := make(map[string]float64, len(a.Values))
 	for k, v := range a.Values {
-		result[k] = v
+		result[k] = b.roundValue(v)
 	}
 	return result
+}
+
+// roundValue rounds a webhook value the way the timeline's querier rounds the
+// polled ones (see RoundingQuerier in the plugin's NewApp).
+func (b *Bridge) roundValue(v float64) float64 {
+	shown := 0
+	if b.cfg.Decimals != nil {
+		shown = *b.cfg.Decimals
+	}
+	return RoundValue(v, TimelineDecimals(shown))
 }
 
 func latestValues(history map[string][]pushward.HistoryPoint) map[string]float64 {

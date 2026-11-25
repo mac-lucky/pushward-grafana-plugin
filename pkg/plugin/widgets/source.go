@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
@@ -43,7 +44,9 @@ func firstFinite(points []bridge.LabeledPoint) (float64, bool) {
 	return v, true
 }
 
-// ScalarSource exposes a single scalar value per call from an instant query.
+// ScalarSource exposes a single scalar value per call from an instant query,
+// rounded with bridge.RoundValue so the widget shows 88.42 and an on_change
+// widget is pushed only when that number changes.
 // Returns shared/widgets.ErrNoData when the query has no result so the manager
 // skips the tick rather than treating it as an error.
 type ScalarSource struct {
@@ -61,7 +64,7 @@ func (s *ScalarSource) Value(ctx context.Context) (float64, error) {
 	if !ok {
 		return 0, sharedwidgets.ErrNoData
 	}
-	return v, nil
+	return bridge.RoundValue(v, bridge.ValueDecimals), nil
 }
 
 // Trend sparkline bounds, mirrored from pushward-server: fewer than 2 or more
@@ -145,7 +148,7 @@ func (s *TrendSource) push(v float64, now time.Time) {
 }
 
 // MultiSource exposes label-keyed fan-out values for queries returning multiple
-// series (one widget per series).
+// series (one widget per series), rounded as ScalarSource rounds its value.
 type MultiSource struct {
 	Q    Querier
 	Expr string
@@ -159,7 +162,7 @@ func (s *MultiSource) Values(ctx context.Context) ([]sharedwidgets.LabeledValue,
 	}
 	out := make([]sharedwidgets.LabeledValue, 0, len(points))
 	for _, p := range points {
-		out = append(out, sharedwidgets.LabeledValue{Labels: p.Labels, Value: p.Point.Value})
+		out = append(out, sharedwidgets.LabeledValue{Labels: p.Labels, Value: bridge.RoundValue(p.Point.Value, bridge.ValueDecimals)})
 	}
 	return out, nil
 }
@@ -169,7 +172,7 @@ func (s *MultiSource) Values(ctx context.Context) ([]sharedwidgets.LabeledValue,
 const defaultMissingValue = "—" // em dash, a deliberate iOS display glyph
 
 // statFuncs are the helpers stat row templates get on top of text/template's.
-var statFuncs = template.FuncMap{"clock": clock}
+var statFuncs = template.FuncMap{"clock": func(r reading, zone ...string) string { return clock(float64(r), zone...) }}
 
 // clock formats a Unix timestamp as a time of day, with the date in front when
 // it is not today: the fallback text for a from_value timer row on clients
@@ -262,10 +265,19 @@ type compiledStatRow struct {
 
 // statRowData is what a row's value and label templates see.
 type statRowData struct {
-	Value  float64
+	Value  reading
 	Unit   string
 	Labels map[string]string
-	Values map[string]float64
+	Values map[string]reading
+}
+
+// reading is a polled value as a row's templates see it: {{.Value}} prints it
+// rounded like every other widget value, in full rather than as 1.234567e+06,
+// while printf, comparisons and clock still get the exact number.
+type reading float64
+
+func (r reading) String() string {
+	return strconv.FormatFloat(bridge.RoundValue(float64(r), bridge.ValueDecimals), 'f', -1, 64)
 }
 
 type statListSource struct {
@@ -330,7 +342,7 @@ func (s *statListSource) queryRow(ctx context.Context, row compiledStatRow, now 
 	if !hasData {
 		return missing, nil
 	}
-	data := statRowData{Value: val, Unit: row.unit, Values: values}
+	data := statRowData{Value: reading(val), Unit: row.unit, Values: values}
 	if len(points) > 0 {
 		data.Labels = points[0].Labels
 	}
@@ -356,18 +368,18 @@ func (s *statListSource) queryRow(ctx context.Context, row compiledStatRow, now 
 
 // valuesBy keys every finite series by the given label's value; nil when no
 // label is named. The first series wins a duplicate key.
-func valuesBy(points []bridge.LabeledPoint, label string) map[string]float64 {
+func valuesBy(points []bridge.LabeledPoint, label string) map[string]reading {
 	if label == "" {
 		return nil
 	}
-	out := make(map[string]float64, len(points))
+	out := make(map[string]reading, len(points))
 	for _, p := range points {
 		key, has := p.Labels[label]
 		v := p.Point.Value
 		if _, seen := out[key]; !has || seen || math.IsNaN(v) || math.IsInf(v, 0) {
 			continue
 		}
-		out[key] = v
+		out[key] = reading(v)
 	}
 	return out
 }

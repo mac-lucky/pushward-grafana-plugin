@@ -112,9 +112,10 @@ type WidgetConfig struct {
 func (w WidgetConfig) IntervalDuration() time.Duration { return w.interval }
 
 // StatRowConfig is one row of a stat_list widget. ValueTemplate is a Go
-// template applied to the polled reading; vars are .Value (float64, the first
-// series), .Unit (string), .Labels (the first series' labels) and .Values (see
-// ValueBy). MissingValue is emitted when the query returns no data.
+// template applied to the polled reading; vars are .Value (the first series'
+// reading, printed rounded and exact under printf), .Unit (string), .Labels
+// (the first series' labels) and .Values (see ValueBy). MissingValue is emitted
+// when the query returns no data.
 type StatRowConfig struct {
 	Label         string `json:"label"`
 	Query         string `json:"query"`

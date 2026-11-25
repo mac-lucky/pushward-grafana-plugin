@@ -113,12 +113,15 @@ func NewApp(ctx context.Context, settings backend.AppInstanceSettings) (instance
 	app.grafana = grafanaapi.NewClient(app.grafanaConn, app.grafanaConnDatasource)
 
 	querier := &dsQuerier{app: app}
-	poller := bridge.NewPoller(querier, app.pw, s.PollInterval)
+	// The timeline sends its readings as the querier returns them; the widget
+	// engine below rounds its own, since a stat row's printf needs the exact one.
+	timeline := bridge.RoundingQuerier{Q: querier, Decimals: bridge.TimelineDecimals(s.Decimals)}
+	poller := bridge.NewPoller(timeline, app.pw, s.PollInterval)
 	// A resolve's retract never retries: a throttled one fails at once and
 	// the resolve sends the resolved push instead. The queued retracts of the
 	// other ends go through app.pw, which waits out the rate limit.
 	retracts := pushward.NewClient(s.APIURL, s.APIKey, pushward.WithRetryBudget(time.Nanosecond))
-	app.bridge = bridge.NewBridge(app.pw, retracts, querier, app.grafana, poller, app.delivery, app.metrics, bridge.Config{
+	app.bridge = bridge.NewBridge(app.pw, retracts, timeline, app.grafana, poller, app.delivery, app.metrics, bridge.Config{
 		HistoryWindow:        s.HistoryWindow,
 		Priority:             s.Priority,
 		CleanupDelay:         s.CleanupDelay,

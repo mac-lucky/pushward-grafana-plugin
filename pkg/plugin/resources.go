@@ -372,7 +372,7 @@ func (a *App) sendTestTimeline(ctx context.Context) error {
 		v := 45 + 47*frac + 4*math.Sin(frac*math.Pi*2)
 		series = append(series, pushward.HistoryPoint{
 			Timestamp: now - int64(i*60),
-			Value:     math.Round(v*10) / 10,
+			Value:     bridge.RoundValue(v, 1),
 		})
 	}
 
