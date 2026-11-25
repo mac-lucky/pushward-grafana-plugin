@@ -17,7 +17,11 @@ import { errorMessage, getWidgets, WidgetSummary } from '../api';
 import { CONFIG_HREF } from '../constants';
 import { RelativeTimeCell } from '../components/ui/RelativeTimeCell';
 import { TemplateCell } from '../components/ui/TemplateCell';
+import { usePhoneColumns } from '../components/ui/usePhoneColumns';
 import { testIds } from '../components/testIds';
+
+// Left out on a phone: the name already says which widget it is.
+const PHONE_HIDDEN = ['slug'];
 
 function formatValue(value: unknown): string {
   if (value === undefined || value === null || value === '') {
@@ -107,6 +111,7 @@ function Widgets() {
     ],
     []
   );
+  const shownColumns = usePhoneColumns(columns, PHONE_HIDDEN);
 
   return (
     <PluginPage
@@ -144,7 +149,7 @@ function Widgets() {
               />
             ) : (
               <InteractiveTable
-                columns={columns}
+                columns={shownColumns}
                 data={widgets}
                 getRowId={(row, index) => row.slug ?? `widget-${index}`}
                 pageSize={15}

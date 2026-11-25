@@ -2,6 +2,7 @@ import React from 'react';
 import { css } from '@emotion/css';
 import { GrafanaTheme2 } from '@grafana/data';
 import {
+  Box,
   Button,
   Combobox,
   ControlledCollapse,
@@ -286,29 +287,35 @@ export function WidgetBuilder({ widgets, onChange }: WidgetBuilderProps) {
               {isStatList && sizeFields('density_by_size', 'row density', DENSITY_OPTIONS)}
             </ControlledCollapse>
 
-            {!isStatList &&
-              !isCountdown &&
-              (isFanout ? (
-                <Field label="Query (multi-series)" description="Edit query_all / slug_template fan-out in the raw JSON view.">
-                  <Input width={W * 2} disabled value={w.query_all as string} />
-                </Field>
-              ) : (
-                <Field
-                  label="Query"
-                  description={
-                    isTrend
-                      ? 'PromQL / MetricsQL returning a scalar. Each poll adds one sparkline sample, up to 48; the widget appears once two are in.'
-                      : 'PromQL / MetricsQL returning a scalar.'
-                  }
-                >
-                  <Input
-                    width={W * 2}
-                    value={(w.query as string) ?? ''}
-                    placeholder="count(up == 1)"
-                    onChange={(e) => update(i, { query: e.currentTarget.value })}
-                  />
-                </Field>
-              ))}
+            {/* The query input fills the card up to its desktop width, so a phone
+                does not have to zoom the whole page out to fit it. */}
+            {!isStatList && !isCountdown && (
+              <Box maxWidth={W * 2}>
+                {isFanout ? (
+                  <Field
+                    label="Query (multi-series)"
+                    description="Edit query_all / slug_template fan-out in the raw JSON view."
+                  >
+                    <Input disabled value={w.query_all as string} />
+                  </Field>
+                ) : (
+                  <Field
+                    label="Query"
+                    description={
+                      isTrend
+                        ? 'PromQL / MetricsQL returning a scalar. Each poll adds one sparkline sample, up to 48; the widget appears once two are in.'
+                        : 'PromQL / MetricsQL returning a scalar.'
+                    }
+                  >
+                    <Input
+                      value={(w.query as string) ?? ''}
+                      placeholder="count(up == 1)"
+                      onChange={(e) => update(i, { query: e.currentTarget.value })}
+                    />
+                  </Field>
+                )}
+              </Box>
+            )}
 
             <Stack direction="row" gap={2} wrap="wrap">
               <Field label="Interval" description="Go duration, min 5s">

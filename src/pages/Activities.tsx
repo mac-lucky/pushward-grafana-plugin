@@ -36,7 +36,12 @@ import {
 import { CONNECT_HREF, PARAM_ALERTNAME, PARAM_RULE_UID } from '../constants';
 import { RelativeTimeCell } from '../components/ui/RelativeTimeCell';
 import { TemplateCell } from '../components/ui/TemplateCell';
+import { usePhoneColumns } from '../components/ui/usePhoneColumns';
 import { testIds } from '../components/testIds';
+
+// Left out on a phone, so the name, state and actions fit the screen.
+const PHONE_HIDDEN_ACTIVITY = ['slug', 'template', 'priority', 'updated_at'];
+const PHONE_HIDDEN_HISTORY = ['slug', 'detail'];
 
 type Notice = { severity: 'success' | 'error'; title: string; detail?: string };
 
@@ -259,7 +264,7 @@ function Activities() {
             return <span className={s.muted}>—</span>;
           }
           return (
-            <Stack direction="row" gap={0.5} alignItems="center">
+            <Stack direction="row" gap={0.5} alignItems="center" wrap="wrap">
               <ButtonGroup>
                 {matchers ? (
                   <Dropdown
@@ -328,6 +333,8 @@ function Activities() {
     ],
     []
   );
+  const shownActivityColumns = usePhoneColumns(activityColumns, PHONE_HIDDEN_ACTIVITY);
+  const shownHistoryColumns = usePhoneColumns(historyColumns, PHONE_HIDDEN_HISTORY);
 
   return (
     <PluginPage
@@ -386,7 +393,7 @@ function Activities() {
                 />
               ) : (
                 <InteractiveTable
-                  columns={activityColumns}
+                  columns={shownActivityColumns}
                   data={shownActivities}
                   getRowId={(row, index) => row.slug ?? `activity-${index}`}
                   pageSize={10}
@@ -403,7 +410,7 @@ function Activities() {
                 <EmptyState variant="not-found" message="No deliveries recorded yet." />
               ) : (
                 <InteractiveTable
-                  columns={historyColumns}
+                  columns={shownHistoryColumns}
                   data={history}
                   getRowId={(row, index) => `${row.ts}-${row.slug}-${index}`}
                   pageSize={15}

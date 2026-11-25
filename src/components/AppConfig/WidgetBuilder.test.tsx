@@ -176,3 +176,26 @@ describe('WidgetBuilder looks', () => {
     expect(saved()[0].content).toEqual({ style: 'bold', style_by_size: { large: 'classic' } });
   });
 });
+
+// A query input wider than a phone made mobile browsers zoom the whole page out
+// until nothing could be read. It now fills the card, up to its desktop width.
+describe('WidgetBuilder query field', () => {
+  const ancestors = (el: HTMLElement) => {
+    const out: HTMLElement[] = [];
+    for (let e: HTMLElement | null = el; e; e = e.parentElement) {
+      out.push(e);
+    }
+    return out;
+  };
+
+  test.each([
+    ['scalar', { slug: 'cpu', template: 'gauge', query: 'up' }, 'count(up == 1)'],
+    ['fan-out', { slug: 'cpu', template: 'value', query_all: 'up', slug_template: '{{.instance}}' }, undefined],
+  ])('%s query has no fixed width', (_, widget, placeholder) => {
+    setup([widget]);
+    const input = placeholder ? screen.getByPlaceholderText(placeholder) : screen.getByDisplayValue('up');
+    const chain = ancestors(input);
+    expect(chain.filter((e) => getComputedStyle(e).width === '576px')).toEqual([]);
+    expect(chain.some((e) => getComputedStyle(e).maxWidth === '576px')).toBe(true);
+  });
+});

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Widget values go out rounded. A gauge that showed 88.42464668357734 on the Widgets page and on your phone now shows 88.42. A value keeps two decimal places and at least three significant digits, so 0.0042 does not turn into 0. A widget that updates on change is pushed only when the rounded number changes. In a stat row, `{{.Value}}` prints the same rounded number, and a large one in full (1234567, not 1.234567e+06); `printf` still gets the exact reading. Timeline values are rounded the same way, to more places when the timeline's **Decimals** setting asks for more than two.
+- The widget form on the Configuration page fits a phone. Its Query field was wider than the screen, so phone browsers zoomed the whole page out. On a phone the Widgets table leaves out the slug, and the Activities page keeps an activity's name, state and actions and a delivery's time, alert, action and result, instead of scrolling the other columns out of sight.
 
 ## 0.18.0
 
