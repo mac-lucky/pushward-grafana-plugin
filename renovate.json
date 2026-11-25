@@ -12,6 +12,11 @@
       "description": "eslint 10 has no lockfile solution here: eslint-plugin-react 7.37.5 still peers eslint <=^9.7 and the Grafana scaffold pins ^9.32.0; lift once both support 10",
       "matchPackageNames": ["eslint"],
       "allowedVersions": "<10.0.0"
+    },
+    {
+      "description": "An in-range override update is lockfile-only by default (npm install pkg@x.y.z), which npm refuses with EOVERRIDE because the override spec differs; bumping the override range rewrites package.json instead and the lockfile regenerates cleanly",
+      "matchDepTypes": ["overrides"],
+      "rangeStrategy": "bump"
     }
   ]
 }
