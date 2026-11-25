@@ -105,6 +105,26 @@ func TestRoundingQuerier(t *testing.T) {
 	}
 }
 
+// NewBridge rounds the readings itself, so a caller that hands it and its
+// poller the exact querier still sends polled, history and final values rounded.
+func TestNewBridgeRoundsTimelineReadings(t *testing.T) {
+	pw := pushward.NewClient("http://127.0.0.1:0", "hlk_x")
+	p := NewPoller(longFloatQuerier{}, pw, time.Hour)
+	b := NewBridge(pw, pw, longFloatQuerier{}, nil, p, nil, nil, Config{})
+	t.Cleanup(b.Stop)
+
+	for name, q := range map[string]MetricsQuerier{"bridge": b.metricsClient, "poller": p.metricsClient} {
+		points, err := q.QueryInstantAll(context.Background(), "up", time.Now())
+		if err != nil || points[0].Point.Value != 88.42 {
+			t.Errorf("%s instant value = %v (%v), want 88.42", name, points[0].Point.Value, err)
+		}
+		series, err := q.QueryRangeAll(context.Background(), "up", time.Now(), time.Now(), time.Minute)
+		if err != nil || series[0].Points[0].Value != 88.42 {
+			t.Errorf("%s range value = %v (%v), want 88.42", name, series[0].Points[0].Value, err)
+		}
+	}
+}
+
 // A webhook's values go out rounded like the polled ones: to the decimals the
 // timeline shows, ValueDecimals at least.
 func TestResolveValuesRounded(t *testing.T) {

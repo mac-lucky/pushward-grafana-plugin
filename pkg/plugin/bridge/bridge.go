@@ -321,8 +321,8 @@ var ErrBusy = errors.New("webhook queue full")
 
 // NewBridge constructs the bridge and starts its background sweeper,
 // alertmanager backstop and retract queue. Call Stop to tear them down. p is the per-alert poller
-// (constructed by the caller with the same metrics querier; both send its readings as it
-// returns them, so the plugin passes a RoundingQuerier); gr may be nil to
+// (constructed by the caller with the same metrics querier); NewBridge wraps both its own and
+// p's querier in a RoundingQuerier, so every timeline reading leaves rounded. gr may be nil to
 // disable PromQL auto-extract and the alertmanager backstop; dl and m may be nil.
 // rc makes the retracts a resolve waits on and should not retry (see
 // retractTimeout); the queued ones go through pw, which waits out a 429.
@@ -360,7 +360,16 @@ func NewBridge(
 		webhookQueue:     make(chan struct{}, maxConcurrentWebhooks+webhookQueueCap),
 		capDrops:         syncx.NewDropCounter(100),
 	}
+	// Rounded here rather than by the caller, so no wiring can send a raw
+	// 88.42464668357734: history and final values go through b.metricsClient,
+	// polled ones through p, the webhook's through roundValue.
+	if mq != nil {
+		b.metricsClient = RoundingQuerier{Q: mq, Decimals: b.decimals()}
+	}
 	if p != nil {
+		if p.metricsClient != nil {
+			p.metricsClient = RoundingQuerier{Q: p.metricsClient, Decimals: b.decimals()}
+		}
 		p.SetUpdateCallback(b.recordPollerValues)
 	}
 
@@ -1236,14 +1245,19 @@ func (b *Bridge) resolveValues(a alert, preferredRefID, seriesLabel string) map[
 	return result
 }
 
-// roundValue rounds a webhook value the way the timeline's querier rounds the
-// polled ones (see RoundingQuerier in the plugin's NewApp).
+// roundValue rounds a webhook value the way NewBridge's RoundingQuerier rounds
+// the polled ones.
 func (b *Bridge) roundValue(v float64) float64 {
+	return RoundValue(v, b.decimals())
+}
+
+// decimals is how many places a timeline reading keeps (see TimelineDecimals).
+func (b *Bridge) decimals() int {
 	shown := 0
 	if b.cfg.Decimals != nil {
 		shown = *b.cfg.Decimals
 	}
-	return RoundValue(v, TimelineDecimals(shown))
+	return TimelineDecimals(shown)
 }
 
 func latestValues(history map[string][]pushward.HistoryPoint) map[string]float64 {
