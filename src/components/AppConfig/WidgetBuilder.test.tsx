@@ -178,7 +178,8 @@ describe('WidgetBuilder looks', () => {
 });
 
 // A query input wider than a phone made mobile browsers zoom the whole page out
-// until nothing could be read. It now fills the card, up to its desktop width.
+// until nothing could be read. It now fills the card, up to its desktop width,
+// while its description keeps the card's full width as before.
 describe('WidgetBuilder query field', () => {
   const ancestors = (el: HTMLElement) => {
     const out: HTMLElement[] = [];
@@ -187,15 +188,27 @@ describe('WidgetBuilder query field', () => {
     }
     return out;
   };
+  const capped = (e: HTMLElement) => getComputedStyle(e).maxWidth === '576px';
 
   test.each([
-    ['scalar', { slug: 'cpu', template: 'gauge', query: 'up' }, 'count(up == 1)'],
-    ['fan-out', { slug: 'cpu', template: 'value', query_all: 'up', slug_template: '{{.instance}}' }, undefined],
-  ])('%s query has no fixed width', (_, widget, placeholder) => {
+    [
+      'scalar',
+      { slug: 'cpu', template: 'trend', query: 'up' },
+      'count(up == 1)',
+      /^PromQL \/ MetricsQL returning a scalar\. Each poll/,
+    ],
+    [
+      'fan-out',
+      { slug: 'cpu', template: 'value', query_all: 'up', slug_template: '{{.instance}}' },
+      undefined,
+      /^Edit query_all/,
+    ],
+  ])('%s query has no fixed width', (_, widget, placeholder, description) => {
     setup([widget]);
     const input = placeholder ? screen.getByPlaceholderText(placeholder) : screen.getByDisplayValue('up');
     const chain = ancestors(input);
     expect(chain.filter((e) => getComputedStyle(e).width === '576px')).toEqual([]);
-    expect(chain.some((e) => getComputedStyle(e).maxWidth === '576px')).toBe(true);
+    expect(chain.some(capped)).toBe(true);
+    expect(ancestors(screen.getByText(description)).some(capped)).toBe(false);
   });
 });

@@ -1,7 +1,9 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import Activities from './Activities';
 import Widgets from './Widgets';
+
+const REFUSED = 'pushward: 422 value must be between min_value and max_value';
 
 const responses: Record<string, unknown> = {
   '/widgets': {
@@ -11,6 +13,7 @@ const responses: Record<string, unknown> = {
   '/history': {
     entries: [
       { ts: 1, alertname: 'HighCPU', slug: 'grafana-0123456789abcdef', action: 'firing', ok: true, detail: 'sent' },
+      { ts: 2, alertname: 'HighCPU', slug: 'grafana-0123456789abcdef', action: 'firing', ok: false, detail: REFUSED },
     ],
   },
   '/active': { active: [] },
@@ -67,5 +70,16 @@ describe('Activities tables', () => {
     expect(await headers(1)).toEqual(['Time', 'Alert', 'Action', 'Result']);
     // Silence and End share one cell; on a narrow screen End goes under Silence.
     expect(screen.getByRole('button', { name: 'End' }).parentElement).toHaveStyle({ flexWrap: 'wrap' });
+  });
+
+  // Without the Detail column the result badge is the only way to read why a
+  // delivery failed.
+  test('show a failed delivery reason from its result on a phone', async () => {
+    phoneWidth();
+    render(<Activities />);
+    const failed = await screen.findByText('failed');
+    expect(screen.queryByText(REFUSED)).not.toBeInTheDocument();
+    fireEvent.mouseEnter(failed);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(REFUSED);
   });
 });

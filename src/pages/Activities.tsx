@@ -322,11 +322,13 @@ function Activities() {
       {
         id: 'ok',
         header: 'Result',
+        // The detail rides along as a tooltip too: a phone leaves its column out,
+        // and a tap on the badge is then the way to read why a delivery failed.
         cell: ({ row: { original } }) =>
           original.ok ? (
-            <Badge color="green" icon="check" text="ok" />
+            <Badge color="green" icon="check" text="ok" tooltip={original.detail || undefined} />
           ) : (
-            <Badge color="red" icon="exclamation-triangle" text="failed" />
+            <Badge color="red" icon="exclamation-triangle" text="failed" tooltip={original.detail || undefined} />
           ),
       },
       { id: 'detail', header: 'Detail' },
