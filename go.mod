@@ -3,7 +3,7 @@ module github.com/mac-lucky/pushward-grafana-plugin
 go 1.27.2
 
 require (
-	github.com/grafana/grafana-plugin-sdk-go v0.300.0
+	github.com/grafana/grafana-plugin-sdk-go v0.301.0
 	github.com/mac-lucky/pushward-integrations/shared v0.0.0-20261118005647-3020cd513ebf
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
@@ -57,7 +57,7 @@ require (
 	github.com/pandatix/go-abnf v0.5.5 // indirect
 	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
 	github.com/pierrec/lz4/v4 v4.1.33 // indirect
-	github.com/prometheus/common v0.73.1 // indirect
+	github.com/prometheus/common v0.74.0 // indirect
 	github.com/prometheus/procfs v0.23.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/unknwon/bra v0.0.0-20200517080246-1e3013ecaff8 // indirect
