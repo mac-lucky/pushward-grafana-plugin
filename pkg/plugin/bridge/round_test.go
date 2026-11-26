@@ -33,6 +33,12 @@ func TestRoundValue(t *testing.T) {
 		{"zero", 0, ValueDecimals, 0},
 		{"largest float", math.MaxFloat64, ValueDecimals, math.MaxFloat64},
 		{"smallest float", math.SmallestNonzeroFloat64, ValueDecimals, math.SmallestNonzeroFloat64},
+		{"negative smallest float", -math.SmallestNonzeroFloat64, ValueDecimals, -math.SmallestNonzeroFloat64},
+		{"second smallest float", 2 * math.SmallestNonzeroFloat64, ValueDecimals, 2 * math.SmallestNonzeroFloat64},
+		{"subnormal", 1e-310, ValueDecimals, 1e-310},
+		{"subnormal keeps three significant digits", 1.23456e-315, ValueDecimals, 1.23e-315},
+		{"largest subnormal", 2.225073858507201e-308, ValueDecimals, 2.23e-308},
+		{"smallest normal", 2.2250738585072014e-308, ValueDecimals, 2.23e-308},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -20,8 +21,15 @@ func RoundValue(v float64, decimals int) float64 {
 	if v == 0 || math.IsNaN(v) || math.IsInf(v, 0) {
 		return v
 	}
+	// The exponent comes from strconv, not math.Log10: the amd64 math.Log reads
+	// every subnormal as about 2^-1023, so 5e-324 rounded to 0 there.
+	e := strconv.FormatFloat(v, 'e', -1, 64)
+	exp, err := strconv.Atoi(e[strings.LastIndexByte(e, 'e')+1:])
+	if err != nil {
+		return v
+	}
 	// 2 - the exponent is how many places three significant digits need.
-	decimals = max(decimals, 2-int(math.Floor(math.Log10(math.Abs(v)))))
+	decimals = max(decimals, 2-exp)
 	r, err := strconv.ParseFloat(strconv.FormatFloat(v, 'f', decimals, 64), 64)
 	if err != nil {
 		return v
