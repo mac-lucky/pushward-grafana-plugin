@@ -3,7 +3,7 @@ module github.com/mac-lucky/pushward-grafana-plugin
 go 1.27.2
 
 require (
-	github.com/grafana/grafana-plugin-sdk-go v0.301.0
+	github.com/grafana/grafana-plugin-sdk-go v0.302.0
 	github.com/mac-lucky/pushward-integrations/shared v0.0.0-20261118005647-3020cd513ebf
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
@@ -11,7 +11,7 @@ require (
 
 require (
 	github.com/BurntSushi/toml v1.6.0 // indirect
-	github.com/apache/arrow-go/v18 v18.8.0 // indirect
+	github.com/apache/arrow-go/v18 v18.9.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -39,8 +39,8 @@ require (
 	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/jaegertracing/jaeger-idl v0.14.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.20.2 // indirect
-	github.com/klauspost/cpuid/v2 v2.4.1 // indirect
+	github.com/klauspost/compress v1.20.3 // indirect
+	github.com/klauspost/cpuid/v2 v2.4.2 // indirect
 	github.com/magefile/mage v1.17.2 // indirect
 	github.com/mattetti/filebuffer v1.0.1 // indirect
 	github.com/mattn/go-colorable v0.1.16 // indirect
